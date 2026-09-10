@@ -2580,7 +2580,7 @@ static void handle_layer_buttons(bContext *C, void *arg1, void *arg2)
 		sl = BKE_scene_layer_find_index(scene, (int)cur);
 		if (!sl) {
 			sl = MEM_callocN(sizeof(SceneLayer), "SceneLayer");
-			BLI_snprintf(sl->name, sizeof(sl->name), "Layer %d", (int)cur + 1);
+			BLI_snprintf(sl->name, sizeof(sl->name), "Layer %d", (int)cur);
 			sl->index = (int)cur;
 			sl->flag = SCE_LAYER_FLAG_VISIBLE;
 			sl->color[0] = 0.6f;
@@ -2605,15 +2605,18 @@ static void handle_layer_buttons(bContext *C, void *arg1, void *arg2)
 
 		scene->active_layer = (int)cur;
 
-		/* Sync v3d->lay with dynamic layer visibility */
+		/* Sync v3d->lay and scene->lay with dynamic layer visibility */
+		scene->lay = 0;
 		if (v3d) {
 			v3d->lay = 0;
-			for (sl = scene->layers.first; sl; sl = sl->next) {
-				if (sl->flag & SCE_LAYER_FLAG_VISIBLE) {
-					if (sl->index < 20) {
+		}
+		for (sl = scene->layers.first; sl; sl = sl->next) {
+			if (sl->flag & SCE_LAYER_FLAG_VISIBLE) {
+				if (sl->index < 32) {
+					scene->lay |= (1u << sl->index);
+					if (v3d) {
 						v3d->lay |= (1u << sl->index);
 					}
-					/* Dynamic layers >= 20 don't set bitmask bits */
 				}
 			}
 		}

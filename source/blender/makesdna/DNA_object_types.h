@@ -109,9 +109,11 @@ struct SceneLayer;  /* Forward declaration - defined in DNA_scene_types.h */ /* 
 /* Layer membership for objects */
 typedef struct ObjectLayerLink {
 	struct ObjectLayerLink *next, *prev;
-	struct SceneLayer *layer;
+	struct SceneLayer *layer;   /* runtime cache; valid only after lib_link_object_layer_links */
+	int layer_index;            /* stable identifier across save/load */
 	int flag;
 	int pad;
+	int pad2;
 } ObjectLayerLink;
 
 typedef struct Object {

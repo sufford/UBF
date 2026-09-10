@@ -332,11 +332,10 @@ bool ED_object_add_generic_get_opts(bContext *C, wmOperator *op, const char view
 		else {
 			Scene *scene = CTX_data_scene(C);
 			/* Use dynamic layer system */
-			if (scene->active_layer < 20) {
+			if (scene->active_layer < 32) {
 				*layer = (1u << scene->active_layer);
 			}
 			else {
-				/* For dynamic layers >= 20, no bitmask */
 				*layer = 0;
 			}
 			for (a = 0; a < 20; a++) {
@@ -426,19 +425,24 @@ Object *ED_object_add_type(
 	/* Set object layer */
 	BASACT->lay = ob->lay = layer;
 
-	printf("DEBUG: active_layer=%d, layer=%u\n", scene->active_layer, layer);
-
 	/* Check if active layer is a dynamic layer (>= 20) */
 	if (scene->active_layer >= 20) {
 		SceneLayer *sl = BKE_scene_layer_find_index(scene, scene->active_layer);
-		printf("DEBUG: sl=%p, sl->index=%d\n", (void*)sl, sl ? sl->index : -1);
-		if (sl) {
-			/* Add to dynamic layer */
-			ObjectLayerLink *link = MEM_callocN(sizeof(ObjectLayerLink), "ObjectLayerLink");
-			link->layer = sl;
-			BLI_addtail(&ob->layer_links, link);
-			printf("DEBUG: added link, ob->layer_links.first=%p\n", (void*)ob->layer_links.first);
+		if (!sl) {
+			/* Create layer if it doesn't exist */
+			sl = MEM_callocN(sizeof(SceneLayer), "SceneLayer");
+			BLI_snprintf(sl->name, sizeof(sl->name), "Layer %d", scene->active_layer);
+			sl->index = scene->active_layer;
+			sl->flag = SCE_LAYER_FLAG_VISIBLE;
+			sl->color[0] = sl->color[1] = sl->color[2] = 0.6f;
+			BLI_addtail(&scene->layers, sl);
 		}
+
+		/* Add to dynamic layer */
+		ObjectLayerLink *link = MEM_callocN(sizeof(ObjectLayerLink), "ObjectLayerLink");
+		link->layer = sl;
+		link->layer_index = sl->index;
+		BLI_addtail(&ob->layer_links, link);
 	}
 
 	/* editor level activate, notifiers */

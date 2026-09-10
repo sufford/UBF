@@ -106,17 +106,24 @@ static void view3d_stereo3d_setup_offscreen(Scene *scene, View3D *v3d, ARegion *
 /* Helper to check if any bit in the mask corresponds to a visible dynamic layer */
 bool view3d_base_visible(Scene *scene, View3D *v3d, Base *base)
 {
-	/* Check old bitmask layers (0-19) */
+	if (STREQ(base->object->id.name + 2, "Cube.002")) {
+		printf("DBG vis: ob='%s' base->lay=0x%08x v3d->lay=0x%08x\n",
+		       base->object->id.name, base->lay, v3d->lay);
+	}
+
 	if (base->lay & v3d->lay) {
 		return true;
 	}
 
-	/* Check dynamic layers via layer_links */
 	if (base->object->layer_links.first) {
 		ObjectLayerLink *link;
 		for (link = base->object->layer_links.first; link; link = link->next) {
 			SceneLayer *sl = link->layer;
-			if (sl && (sl->index == scene->active_layer) && (sl->flag & SCE_LAYER_FLAG_VISIBLE)) {
+			if (STREQ(base->object->id.name + 2, "Cube.002")) {
+				printf("DBG vis link: ob='%s' link->layer=%p sl->flag=0x%x\n",
+				       base->object->id.name, (void*)sl, sl ? sl->flag : 0);
+			}
+			if (sl && (sl->flag & SCE_LAYER_FLAG_VISIBLE)) {
 				return true;
 			}
 		}
@@ -2978,9 +2985,9 @@ static void view3d_draw_objects(
 		}
 
 
-		/* mask out localview */
-		v3d->lay_used = lay_used & ((1 << 20) - 1);
-
+		/* mask out localview (bits 24-31) */
+		v3d->lay_used = lay_used & ((1 << 24) - 1);
+		
 		/* draw selected and editmode */
 		for (base = scene->base.first; base; base = base->next) {
 			if (view3d_base_visible(scene, v3d, base)) {

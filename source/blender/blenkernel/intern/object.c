@@ -446,6 +446,9 @@ void BKE_object_free(Object *ob)
 	BLI_freelistN(&ob->pc_ids);
 
 	BLI_freelistN(&ob->lodlevels);
+	
+	/* Free dynamic layer links. */
+	BLI_freelistN(&ob->layer_links);
 
 	/* Free runtime curves data. */
 	if (ob->curve_cache) {
@@ -1176,7 +1179,10 @@ void BKE_object_copy_data(Main *UNUSED(bmain), Object *ob_dst, const Object *ob_
 	ob_dst->mpath = NULL;
 
 	copy_object_lod(ob_dst, ob_src, flag_subdata);
-
+	
+	/* Copy dynamic layer links. */
+	BLI_duplicatelist(&ob_dst->layer_links, &ob_src->layer_links);
+	
 	/* Do not copy runtime curve data. */
 	ob_dst->curve_cache = NULL;
 

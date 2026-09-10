@@ -5011,12 +5011,19 @@ static void database_init_objects(Render *re, unsigned int renderlay, int nolamp
 
 	for (SETLOOPER(re->scene, sce_iter, base)) {
 		ob= base->object;
+		
+		printf("DBG db_init: ob='%s' ob->lay=0x%08x base->lay=0x%08x re->lay=0x%08x renderlay=0x%08x\n",
+			ob->id.name, ob->lay, base->lay, re->lay, renderlay);
+		fflush(stdout);
 
 		/* in the prev/next pass for making speed vectors, avoid creating
 		 * objects that are not on a renderlayer with a vector pass, can
 		 * save a lot of time in complex scenes */
 		vectorlay= get_vector_renderlayers(re->scene);
 		lay= (timeoffset)? renderlay & vectorlay: renderlay;
+		
+		printf("DBG db_init2: lay=0x%08x vectorlay=0x%08x timeoffset=%d\n",
+		       lay, vectorlay, timeoffset);
 
 		/* if the object has been restricted from rendering in the outliner, ignore it */
 		if (is_object_restricted(re, ob)) continue;

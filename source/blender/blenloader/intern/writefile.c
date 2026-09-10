@@ -1952,6 +1952,7 @@ static void write_object(WriteData *wd, Object *ob)
 
 		writelist(wd, DATA, LinkData, &ob->pc_ids);
 		writelist(wd, DATA, LodLevel, &ob->lodlevels);
+		writelist(wd, DATA, ObjectLayerLink, &ob->layer_links);
 
 		write_previews(wd, ob->preview);
 	}
@@ -2753,6 +2754,9 @@ static void write_scene(WriteData *wd, Scene *sce)
 	for (SceneRenderView *srv = sce->r.views.first; srv; srv = srv->next) {
 		writestruct(wd, DATA, SceneRenderView, 1, srv);
 	}
+	
+	/* Dynamic layers (Scene.layers) */
+	writelist(wd, DATA, SceneLayer, &sce->layers);
 
 	if (sce->nodetree) {
 		writestruct(wd, DATA, bNodeTree, 1, sce->nodetree);

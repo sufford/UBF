@@ -1213,7 +1213,7 @@ static int view3d_layer_add_exec(bContext *C, wmOperator *UNUSED(op))
 	char name[64];
 	FILE *fp = fopen("D:/layer_debug.txt", "a");
 
-	BLI_snprintf(name, sizeof(name), "Layer %d", BLI_listbase_count(&scene->layers) + 1);
+	BLI_snprintf(name, sizeof(name), "Layer %d", BLI_listbase_count(&scene->layers));
 	BLI_strncpy(sl->name, name, sizeof(sl->name));
 	sl->index = BLI_listbase_count(&scene->layers);  /* Before adding to list */
 	BLI_addtail(&scene->layers, sl);

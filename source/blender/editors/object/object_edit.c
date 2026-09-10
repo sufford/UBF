@@ -2210,6 +2210,7 @@ static void object_dynamic_layer_add(Object *ob, SceneLayer *sl)
 	/* Create new link */
 	link = MEM_callocN(sizeof(ObjectLayerLink), "ObjectLayerLink");
 	link->layer = sl;
+	link->layer_index = sl->index;
 	BLI_addtail(&ob->layer_links, link);
 }
 
@@ -2220,11 +2221,8 @@ static void object_dynamic_layer_update_bitmask(Object *ob)
 
 	ob->lay = 0;
 	for (link = ob->layer_links.first; link; link = link->next) {
-		if (link->layer) {
-			if (link->layer->index < 32) {
-				/* Map ALL layers to bits 0-31 */
-				ob->lay |= (1u << link->layer->index);
-			}
+		if (link->layer_index < 32) {
+			ob->lay |= (1u << link->layer_index);
 		}
 	}
 }
@@ -2248,7 +2246,7 @@ static int object_move_to_layer_set_exec(bContext *C, wmOperator *op)
 	if (!target_layer) {
 		/* Create the layer if it doesn't exist */
 		target_layer = MEM_callocN(sizeof(SceneLayer), "SceneLayer");
-		BLI_snprintf(target_layer->name, sizeof(target_layer->name), "Layer %d", layer_index + 1);
+		BLI_snprintf(target_layer->name, sizeof(target_layer->name), "Layer %d", layer_index);
 		target_layer->index = layer_index;
 		target_layer->flag = SCE_LAYER_FLAG_VISIBLE;
 		target_layer->color[0] = 0.6f;

@@ -1973,6 +1973,12 @@ static void render_scene(Render *re, Scene *sce, int cfra)
 	resc->main = re->main;
 	resc->scene = sce;
 	resc->lay = sce->lay;
+	
+	/* dynamic layer thing */
+	if (sce->active_layer >= 20 && sce->active_layer < 32) {
+		resc->lay |= (1u << sce->active_layer);
+	}
+	
 	resc->scene_color_manage = BKE_scene_check_color_management_enabled(sce);
 
 	/* ensure scene has depsgraph, base flags etc OK */
@@ -3245,6 +3251,14 @@ static int render_initialize_from_main(Render *re, RenderData *rd, Main *bmain, 
 	re->lay = lay_override ? lay_override : scene->lay;
 	re->layer_override = lay_override;
 	re->i.localview = (re->lay & 0xFF000000) != 0;
+	/* dynamic thing */
+	re->lay = lay_override ? lay_override : scene->lay;
+	if (scene->active_layer >= 20 && scene->active_layer < 32) {
+		re->lay |= (1u << scene->active_layer);
+	}
+	re->layer_override = lay_override;
+	re->i.localview = (re->lay & 0xFF000000) != 0;
+	/* end here */
 	re->viewname[0] = '\0';
 
 	/* not too nice, but it survives anim-border render */
@@ -3909,6 +3923,11 @@ void RE_PreviewRender(Render *re, Main *bmain, Scene *sce)
 	re->scene = sce;
 	re->scene_color_manage = BKE_scene_check_color_management_enabled(sce);
 	re->lay = sce->lay;
+	
+	/* dynamic layer thing */
+	if (sce->active_layer >= 20 && sce->active_layer < 32) {
+		re->lay |= (1u << sce->active_layer);
+	}
 
 	camera = RE_GetCamera(re);
 	RE_SetCamera(re, camera);

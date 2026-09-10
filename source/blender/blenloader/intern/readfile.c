@@ -4782,6 +4782,57 @@ static void lib_link_modifiers(FileData *fd, Object *ob)
 	modifiers_foreachIDLink(ob, lib_link_modifiers__linkModifiers, fd);
 }
 
+/* dynamic layer thing*/
+static void lib_link_object_layer_links(Main *main, Object *ob)
+{
+    ObjectLayerLink *link;
+
+    /* Only rewrite ob->lay for objects that actually use dynamic layers.
+     * Objects with no layer_links keep their classic 20-bit mask from the file,
+     * otherwise they end up at 0 and vanish from every renderer (F12, material
+     * preview, viewport, etc.). */
+    if (ob->layer_links.first == NULL) {
+        return;
+    }
+
+    ob->lay = 0;
+
+    DAG_id_tag_update(&ob->id, OB_RECALC_OB | OB_RECALC_DATA | OB_RECALC_TIME);
+
+    if (STREQ(ob->id.name + 2, "Cube.002")) {
+        printf("DBG cube: type=%d dt=%d data=%p derivedFinal=%p derivedDeform=%p\n",
+               ob->type, ob->dt, ob->data,
+               (void*)ob->derivedFinal, (void*)ob->derivedDeform);
+    }
+
+    for (link = ob->layer_links.first; link; link = link->next) {
+        Scene *sce_iter;
+
+        printf("DBG relink pre: ob='%s' link=%p layer_index=%d\n",
+               ob->id.name, (void *)link, link->layer_index);
+
+        link->layer = NULL;
+
+        for (sce_iter = main->scene.first; sce_iter; sce_iter = sce_iter->id.next) {
+            SceneLayer *sl;
+            for (sl = sce_iter->layers.first; sl; sl = sl->next) {
+                if (sl->index == link->layer_index) {
+                    link->layer = sl;
+                    break;
+                }
+            }
+            if (link->layer) break;
+        }
+
+        if (link->layer_index >= 0 && link->layer_index < 32) {
+            ob->lay |= (1u << link->layer_index);
+        }
+
+        printf("DBG relink post: ob='%s' layer_index=%d found=%p ob->lay=0x%08x\n",
+               ob->id.name, link->layer_index, (void *)link->layer, ob->lay);
+    }
+}
+
 static void lib_link_object(FileData *fd, Main *main)
 {
 	bool warn = false;
@@ -5064,6 +5115,9 @@ static void lib_link_object(FileData *fd, Main *main)
 				}
 			}
 		}
+		/* Dynamic layers */
+		lib_link_object_layer_links(main, ob);
+		
 	}
 
 	if (warn) {
@@ -5693,6 +5747,7 @@ static void direct_link_object(FileData *fd, Object *ob)
 	}
 
 	link_list(fd, &ob->lodlevels);
+	link_list(fd, &ob->layer_links);
 	ob->currentlod = ob->lodlevels.first;
 
 	ob->preview = direct_link_preview_image(fd, ob->preview);
@@ -6267,8 +6322,18 @@ static void direct_link_scene(FileData *fd, Scene *sce)
 			rbw->ltime = (float)rbw->pointcache->startframe;
 		}
 	}
-
+	
 	sce->preview = direct_link_preview_image(fd, sce->preview);
+
+	/* Dynamic layer list */
+	link_list(fd, &sce->layers);
+	{
+		SceneLayer *sl;
+		for (sl = sce->layers.first; sl; sl = sl->next) {
+			printf("DBG scene layers: sce='%s' sl='%s' index=%d flag=0x%x\n",
+			       sce->id.name, sl->name, sl->index, sl->flag);
+		}
+	}
 
 	direct_link_curvemapping(fd, &sce->r.mblur_shutter_curve);
 }
@@ -8600,6 +8665,19 @@ static void lib_link_all(FileData *fd, Main *main)
 	lib_link_cachefiles(fd, main);
 
 	lib_link_library(fd, main);    /* only init users */
+	
+	/* Dynamic layers: base->lay must mirror object->lay for the header/viewport
+	 * visibility check (base->lay & v3d->lay) to work after file load. */
+	{
+		Scene *sce;
+		for (sce = main->scene.first; sce; sce = sce->id.next) {
+			Base *base;
+			for (base = sce->base.first; base; base = base->next) {
+				base->lay = base->object->lay;
+			}
+		}
+	}
+	
 }
 
 static void direct_link_keymapitem(FileData *fd, wmKeyMapItem *kmi)
