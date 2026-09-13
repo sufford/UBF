@@ -2620,7 +2620,17 @@ static void handle_layer_buttons(bContext *C, void *arg1, void *arg2)
 				}
 			}
 		}
-		printf("DEBUG handle: cur=%d, v3d->lay=%u, active_layer=%d\n", cur, v3d ? v3d->lay : 0, scene->active_layer);
+		
+		/* Ensure the active layer is in the mask even if its visible flag
+		* is stale - the DAG and the renderer gate on scene->lay and
+		* will silently drop objects otherwise. */
+		if (scene->active_layer >= 0 && scene->active_layer < 32) {
+			scene->lay |= (1u << scene->active_layer);
+			if (v3d) {
+				v3d->lay |= (1u << scene->active_layer);
+			}
+		}
+		printf("DEBUG handle: cur=%d, v3d->lay=0x%08x, scene->lay=0x%08x, active_layer=%d\n",cur, v3d ? v3d->lay : 0, scene->lay, scene->active_layer);
 
 		WM_event_add_notifier(C, NC_SCENE | ND_LAYER, scene);
 		return;
