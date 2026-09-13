@@ -4,8 +4,7 @@ Currently featuring:
 * Dynamic layers (In process)
 * Custom modifiers (Currently 10 implemented)
 * KXScript (replacing BGE python module lib) (In process; extremely basic functions for now)
-* Box3D physics (Currently compiles only)
-* Jolt physics (Switch between Box3D and Jolt per object) (Currently compiles only)
+* A support for hybrid physics implementation (Box3D + Jolt) (Switch between Box3D and Jolt per object) (Both physics engines currently compiles only, no wrapping yet)
 
 
 Future roadmap:
