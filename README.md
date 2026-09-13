@@ -5,6 +5,8 @@ Currently featuring:
 * Custom modifiers (Currently 10 implemented)
 * KXScript (replacing BGE python module lib) (In process; extremely basic functions for now)
 * Box3D physics (Currently compiles only)
+* Jolt physics (Switch between Box3D and Jolt per object) (Currently compiles only)
+
 
 Future roadmap:
 * Real-time Internal render
@@ -12,4 +14,3 @@ Future roadmap:
 * OpenGL 3.3 (Unlikely, but possible)
 * VST support (Also unlikely)
 * Edit poly
-* Jolt physics (Switch between Box3D and Jolt per object)
