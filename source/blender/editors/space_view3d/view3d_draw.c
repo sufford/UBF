@@ -2613,15 +2613,28 @@ static void gpu_render_lamp_update(Scene *scene, View3D *v3d,
 	Lamp *la = (Lamp *)ob->data;
 	View3DShadow *shadow;
 	unsigned int layers;
+	unsigned int lamp_lay = lay;
+	unsigned int view_lay = v3d->lay;
+	bool is_dynamic = (ob->layer_links.first != NULL);
+
+	if (is_dynamic) {
+		/* Dynamic-layer lamp: ob->lay is 0 by design. Substitute a mask
+		 * that the GPU lamp / surface matching can actually intersect.
+		 * v3d->lay carries the visible layer bits for the current viewport,
+		 * and view3d_base_visible() has already decided this lamp is on. */
+		lamp_lay  = v3d->lay;
+		view_lay  = v3d->lay;
+	}
 
 	lamp = GPU_lamp_from_blender(scene, ob, par);
 
 	if (lamp) {
-		GPU_lamp_update(lamp, lay, (ob->restrictflag & OB_RESTRICT_RENDER), obmat);
+		GPU_lamp_update(lamp, lamp_lay, (ob->restrictflag & OB_RESTRICT_RENDER), obmat);
+		GPU_lamp_set_dynamic(lamp, is_dynamic);
 		GPU_lamp_update_colors(lamp, la->r, la->g, la->b, la->energy);
 
-		layers = lay & v3d->lay;
-		if (srl)
+		layers = lamp_lay & view_lay;
+		if (srl && !is_dynamic)
 			layers &= srl->lay;
 
 		if (layers &&
@@ -2650,10 +2663,14 @@ static void gpu_update_lamps_shadows_world(Main *bmain, Scene *scene, View3D *v3
 
 	/* update lamp transform and gather shadow lamps */
 	for (SETLOOPER(scene, sce_iter, base)) {
+		if (!view3d_base_visible(scene, v3d, base))
+			continue;
+	
 		ob = base->object;
-
+	
 		if (ob->type == OB_LAMP)
 			gpu_render_lamp_update(scene, v3d, ob, NULL, ob->obmat, ob->lay, &shadows, srl);
+
 
 		if (ob->transflag & OB_DUPLI) {
 			DupliObject *dob;

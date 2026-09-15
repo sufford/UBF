@@ -164,6 +164,8 @@ struct GPULamp {
 	GPUTexture *blurtex;
 
 	ListBase materials;
+	
+	bool is_dynamic;
 };
 
 /* Forward declaration so shade_light_textures() can use this, while still keeping the code somewhat organized */
@@ -324,15 +326,25 @@ void GPU_material_bind(
 		GPUShader *shader = GPU_pass_shader(material->pass);
 		SceneRenderLayer *srl = scenelock ? BLI_findlink(&material->scene->r.layers, material->scene->r.actlay) : NULL;
 
-		if (srl)
-			viewlay &= srl->lay;
-
 		/* handle layer lamps */
 		if (material->type == GPU_MATERIAL_TYPE_MESH) {
 			for (LinkData *nlink = material->lamps.first; nlink; nlink = nlink->next) {
 				GPULamp *lamp = nlink->data;
+				unsigned int effective_viewlay = viewlay;
 
-				if ((lamp->lay & viewlay) && (!(lamp->mode & LA_LAYER) || (lamp->lay & oblay)) &&
+				/* srl->lay is a classic 20-bit mask. Dynamic lamps store
+				 * v3d->lay in lamp->lay, which has no bits inside srl->lay,
+				 * so ANDing would zero them out. Skip the reduction for
+				 * dynamic lamps. */
+				if (srl && !lamp->is_dynamic)
+					effective_viewlay &= srl->lay;
+
+				printf("DBG matbind: lamp=%p lamp->lay=0x%08x eff_viewlay=0x%08x oblay=0x%08x is_dyn=%d mode=0x%x\n",
+					(void *)lamp, lamp->lay, effective_viewlay, oblay,
+					(int)lamp->is_dynamic, lamp->mode);
+
+				if ((lamp->lay & effective_viewlay) &&
+				    (!(lamp->mode & LA_LAYER) || (lamp->lay & oblay)) &&
 				    GPU_lamp_visible(lamp, srl, material->ma))
 				{
 					lamp->dynenergy = lamp->energy;
@@ -342,6 +354,7 @@ void GPU_material_bind(
 					lamp->dynenergy = 0.0f;
 					lamp->dyncol[0] = lamp->dyncol[1] = lamp->dyncol[2] = 0.0f;
 				}
+				/* ... rest of loop unchanged ... */
 
 				if (material->dynproperty & DYN_LAMP_VEC) {
 					copy_v3_v3(lamp->dynvec, lamp->vec);
@@ -2303,6 +2316,11 @@ void GPU_lamp_update_spot(GPULamp *lamp, float spotsize, float spotblend)
 {
 	lamp->spotsi = cosf(spotsize * 0.5f);
 	lamp->spotbl = (1.0f - lamp->spotsi) * spotblend;
+}
+
+void GPU_lamp_set_dynamic(GPULamp *lamp, bool is_dynamic)
+{
+    lamp->is_dynamic = is_dynamic;
 }
 
 static void gpu_lamp_from_blender(Scene *scene, Object *ob, Object *par, Lamp *la, GPULamp *lamp)
