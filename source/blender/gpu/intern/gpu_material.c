@@ -339,10 +339,6 @@ void GPU_material_bind(
 				if (srl && !lamp->is_dynamic)
 					effective_viewlay &= srl->lay;
 
-				printf("DBG matbind: lamp=%p lamp->lay=0x%08x eff_viewlay=0x%08x oblay=0x%08x is_dyn=%d mode=0x%x\n",
-					(void *)lamp, lamp->lay, effective_viewlay, oblay,
-					(int)lamp->is_dynamic, lamp->mode);
-
 				if ((lamp->lay & effective_viewlay) &&
 				    (!(lamp->mode & LA_LAYER) || (lamp->lay & oblay)) &&
 				    GPU_lamp_visible(lamp, srl, material->ma))

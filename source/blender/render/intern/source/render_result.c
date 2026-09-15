@@ -310,6 +310,14 @@ RenderResult *render_result_new(Render *re, rcti *partrct, int crop, int savebuf
 
 		BLI_strncpy(rl->name, srl->name, sizeof(rl->name));
 		rl->lay = srl->lay;
+		/* Dynamic-layer bits are not part of SceneRenderLayer's classic 20-bit
+		* mask. Propagate the active dynamic layer into the render-layer copy so
+		* downstream consumers (zbuf, shadeoutput, shadbuf) see it without needing
+		* their own dynamic-layer check. 32-bit cap applies; dynamic layers 32+
+		* need the link-based path to replace this wholesale. */
+		if (re->scene && re->scene->active_layer >= 20 && re->scene->active_layer < 32) {
+			rl->lay |= (1u << re->scene->active_layer);
+		}
 		rl->lay_zmask = srl->lay_zmask;
 		rl->lay_exclude = srl->lay_exclude;
 		rl->layflag = srl->layflag;
