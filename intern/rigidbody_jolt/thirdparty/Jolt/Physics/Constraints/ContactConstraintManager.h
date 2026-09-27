@@ -91,6 +91,8 @@ public:
 
 	/// Get a new allocator context for storing contacts. Note that you should call this once and then add multiple contacts using the context.
 	ContactAllocator			GetContactAllocator()												{ return mCache[mCacheWriteIdx].GetContactAllocator(); }
+	LFHMAllocator &				GetContactAllocatorAllocator()										{ return mCache[mCacheWriteIdx].GetAllocator(); }
+	uint32						GetContactAllocatorBlockSize()										{ return ManifoldCache::GetContactAllocatorBlockSize(); }
 
 	/// Check if the contact points from the previous frame are reusable and if so copy them.
 	/// When the cache was usable and the pair has been handled: outPairHandled = true.
@@ -367,6 +369,8 @@ private:
 
 		/// Get a new allocator context for storing contacts. Note that you should call this once and then add multiple contacts using the context.
 		ContactAllocator		GetContactAllocator()						{ return ContactAllocator(mAllocator, cAllocatorBlockSize); }
+		LFHMAllocator &			GetAllocator()								{ return mAllocator; }
+		static constexpr uint32	GetContactAllocatorBlockSize()				{ return cAllocatorBlockSize; }
 
 		/// Find / create cached entry for SubShapeIDPair -> CachedManifold
 		const MKeyValue *		Find(const SubShapeIDPair &inKey, uint64 inKeyHash) const;

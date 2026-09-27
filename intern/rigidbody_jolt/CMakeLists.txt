@@ -35,5 +35,8 @@ if(MSVC)
         /wd4577             # Ignores exception warnings
     )
     
-    target_compile_definitions(bf_intern_jolt PUBLIC JPH_DEBUG_RENDERER)
+    target_compile_definitions(bf_intern_jolt PRIVATE
+    JPH_DEBUG_RENDERER
+    JPH_ENABLE_ASSERTS
+)
 endif()

@@ -898,7 +898,8 @@ void PhysicsSystem::JobFindCollisions(PhysicsUpdateContext::Step *ioStep, int in
 #endif
 
 	// Allocation context for allocating new contact points
-	ContactAllocator contact_allocator(mContactManager.GetContactAllocator());
+	// VS2017 workaround: construct in-place to avoid copy (no guaranteed copy elision)
+	ContactAllocator contact_allocator(mContactManager.GetContactAllocatorAllocator(), mContactManager.GetContactAllocatorBlockSize());
 
 	// Determine initial queue to read pairs from if no broadphase work can be done
 	// (always start looking at results from the next job)
@@ -1806,7 +1807,8 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 #endif
 
 	// Allocation context for allocating new contact points
-	ContactAllocator contact_allocator(mContactManager.GetContactAllocator());
+	// VS2017 workaround: construct in-place to avoid copy (no guaranteed copy elision)
+	ContactAllocator contact_allocator(mContactManager.GetContactAllocatorAllocator(), mContactManager.GetContactAllocatorBlockSize());
 
 	// Settings
 	ShapeCastSettings settings;
