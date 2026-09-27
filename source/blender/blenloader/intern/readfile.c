@@ -5181,6 +5181,38 @@ static void direct_link_modifiers(FileData *fd, ListBase *lb)
 
 			amd->prevCos = NULL;
 		}
+				else if (md->type == eModifierType_Array) {
+			ArrayModifierData *amd = (ArrayModifierData *)md;
+
+			/* Backport fix: старые .blend не имеют полей shape_type,
+			 * transform_ref, transform_scale, circle_*, random_*.
+			 * DNA-реконструкция обнуляет их. MOD_ARR_SHAPE_LINE и
+			 * MOD_ARR_TRANSFORM_LINEAR равны 0, так что эти два поля
+			 * уже корректны. А вот transform_scale = {0,0,0} вырождает
+			 * все копии в точку. Восстанавливаем дефолты. */
+
+			if (amd->transform_scale[0] == 0.0f) amd->transform_scale[0] = 1.0f;
+			if (amd->transform_scale[1] == 0.0f) amd->transform_scale[1] = 1.0f;
+			if (amd->transform_scale[2] == 0.0f) amd->transform_scale[2] = 1.0f;
+
+			if (amd->circle_radius == 0.0f) amd->circle_radius = 1.0f;
+			if (amd->circle_angle == 0.0f) amd->circle_angle = 360.0f;
+
+			if (amd->count < 1) amd->count = 1;
+
+			if (amd->shape_type < MOD_ARR_SHAPE_LINE || amd->shape_type > MOD_ARR_SHAPE_TRANSFORM) {
+				amd->shape_type = MOD_ARR_SHAPE_LINE;
+			}
+
+			if (amd->transform_ref != MOD_ARR_TRANSFORM_LINEAR &&
+			    amd->transform_ref != MOD_ARR_TRANSFORM_OBJECT) {
+				amd->transform_ref = MOD_ARR_TRANSFORM_LINEAR;
+			}
+
+			if (amd->circle_axis < 0 || amd->circle_axis > 2) {
+				amd->circle_axis = 2;
+			}
+		}
 		else if (md->type == eModifierType_Cloth) {
 			ClothModifierData *clmd = (ClothModifierData *)md;
 
