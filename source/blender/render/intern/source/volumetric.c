@@ -40,6 +40,7 @@
 #include "DNA_lamp_types.h"
 #include "DNA_meta_types.h"
 
+#include "BKE_scene.h"
 
 #include "render_types.h"
 #include "pixelshading.h"
@@ -475,8 +476,10 @@ static void vol_shade_one_lamp(struct ShadeInput *shi, const float co[3], const 
 	float hitco[3], *atten_co;
 	float p, ref_col[3];
 
-	if (lar->mode & LA_LAYER) if ((lar->lay & shi->obi->lay) == 0) return;
-	if ((lar->lay & shi->lay) == 0) return;
+	if (lar->mode & LA_LAYER) {
+		if ((lar->lay & shi->obi->lay) == 0 && !BKE_object_layer_visible(shi->obi->ob)) return;
+	}
+	if ((lar->lay & shi->lay) == 0 && !BKE_object_layer_visible(lar->ob)) return;
 	if (lar->energy == 0.0f) return;
 
 	if ((visifac = lamp_get_visibility(lar, co, lv, &lampdist)) == 0.f) return;

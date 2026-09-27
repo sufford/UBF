@@ -57,6 +57,7 @@ struct World;
 struct bGPDbrush;
 struct bGPdata;
 struct bNodeTree;
+struct Object;
 
 /* ************************************************************* */
 /* Scene Data */
@@ -1648,10 +1649,6 @@ typedef struct SceneLayer {
 	int pad;
 } SceneLayer;
 
-/* SceneLayer.flag */
-#define SCE_LAYER_FLAG_VISIBLE (1 << 0)
-#define SCE_LAYER_FLAG_LOCKED  (1 << 1)
-
 typedef struct Scene {
 	ID id;
 	struct AnimData *adt;	/* animation data (must be immediately after id for utilities to use it) */
@@ -1743,6 +1740,9 @@ typedef struct Scene {
 	ListBase layers;
 	int active_layer;
 	int active_layer_page;  /* Pagination state for layer UI */
+	int layer_visibility_generation;      /* bumped when any SceneLayer.flag changes */
+	int layer_visibility_generation_seen; /* cached copy, compared in DAG_on_visible_update */
+
 } Scene;
 
 /* **************** RENDERDATA ********************* */

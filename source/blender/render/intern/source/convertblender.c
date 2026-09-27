@@ -1065,7 +1065,10 @@ static void particle_curve(Render *re, ObjectRen *obr, DerivedMesh *dm, Material
 		static_particle_wire(obr, ma, loc, loc1, sd->first, sd->line);
 	else if (ma->material_type == MA_TYPE_HALO) {
 		har= RE_inithalo_particle(re, obr, dm, ma, loc, loc1, sd->orco, sd->uvco, sd->size, 1.0, seed, pa_co);
-		if (har) har->lay= obr->ob->lay;
+		if (har) {
+			har->lay = obr->ob->lay;
+			har->ob = obr->ob;
+		}
 	}
 	else
 		static_particle_strand(re, obr, ma, sd, loc, loc1);
@@ -1239,7 +1242,10 @@ static void particle_normal_ren(short ren_as, ParticleSettings *part, Render *re
 
 			har = RE_inithalo_particle(re, obr, dm, ma, loc, NULL, sd->orco, sd->uvco, hasize, 0.0, seed, pa_co);
 
-			if (har) har->lay= obr->ob->lay;
+			if (har) {
+				har->lay = obr->ob->lay;
+				har->ob = obr->ob;
+			}
 
 			break;
 		}
@@ -1930,7 +1936,10 @@ static void make_render_halos(Render *re, ObjectRen *obr, Mesh *UNUSED(me), int 
 
 			if (orco) har= RE_inithalo(re, obr, ma, vec, NULL, orco, hasize, 0.0, seed);
 			else har= RE_inithalo(re, obr, ma, vec, NULL, mvert->co, hasize, 0.0, seed);
-			if (har) har->lay= ob->lay;
+			if (har) {
+				har->lay = ob->lay;
+				har->ob = ob;
+			}
 		}
 		if (orco) orco+= 3;
 		seed++;
@@ -3808,6 +3817,7 @@ static GroupObject *add_render_lamp(Render *re, Object *ob)
 	memcpy(lar->mtex, la->mtex, MAX_MTEX*sizeof(void *));
 
 	lar->lay = ob->lay & 0xFFFFFF;  /* higher 8 bits are localview layers */
+	lar->ob = ob;
 
 	lar->falloff_type = la->falloff_type;
 	lar->ld1= la->att1;
@@ -3982,7 +3992,7 @@ static void add_lightgroup(Render *re, Group *group, int exclusive)
 		if (is_object_hidden(re, go->ob))
 			continue;
 
-		if (go->ob->lay & re->lay) {
+		if ((go->ob->lay & re->lay) || BKE_object_layer_visible(go->ob)) {
 			if (go->ob && go->ob->type==OB_LAMP) {
 				for (gol= re->lights.first; gol; gol= gol->next) {
 					if (gol->ob==go->ob) {
@@ -5011,19 +5021,12 @@ static void database_init_objects(Render *re, unsigned int renderlay, int nolamp
 
 	for (SETLOOPER(re->scene, sce_iter, base)) {
 		ob= base->object;
-		
-		printf("DBG db_init: ob='%s' ob->lay=0x%08x base->lay=0x%08x re->lay=0x%08x renderlay=0x%08x\n",
-			ob->id.name, ob->lay, base->lay, re->lay, renderlay);
-		fflush(stdout);
 
 		/* in the prev/next pass for making speed vectors, avoid creating
 		 * objects that are not on a renderlayer with a vector pass, can
 		 * save a lot of time in complex scenes */
 		vectorlay= get_vector_renderlayers(re->scene);
 		lay= (timeoffset)? renderlay & vectorlay: renderlay;
-		
-		printf("DBG db_init2: lay=0x%08x vectorlay=0x%08x timeoffset=%d\n",
-		       lay, vectorlay, timeoffset);
 
 		/* if the object has been restricted from rendering in the outliner, ignore it */
 		if (is_object_restricted(re, ob)) continue;
@@ -5039,7 +5042,7 @@ static void database_init_objects(Render *re, unsigned int renderlay, int nolamp
 				}
 			}
 		}
-		else if ((base->lay & lay) || (ob->type==OB_LAMP && (base->lay & re->lay)) ) {
+		else if (BKE_object_layer_visible(ob) || (base->lay & lay) || (ob->type==OB_LAMP && (base->lay & re->lay)) ) {
 			if ((ob->transflag & OB_DUPLI) && (ob->type!=OB_MBALL)) {
 				DupliObject *dob;
 				ListBase *duplilist;
@@ -5819,7 +5822,7 @@ void RE_Database_FromScene_Vectors(Render *re, Main *bmain, Scene *sce, unsigned
 				int ok= 1;
 				FluidsimModifierData *fluidmd;
 
-				if (!(obi->lay & vectorlay))
+				if (!(obi->lay & vectorlay) && !BKE_object_layer_visible(obi->ob))
 					continue;
 
 				obi->totvector= obi->obr->totvert;

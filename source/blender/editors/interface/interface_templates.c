@@ -2630,7 +2630,6 @@ static void handle_layer_buttons(bContext *C, void *arg1, void *arg2)
 				v3d->lay |= (1u << scene->active_layer);
 			}
 		}
-		printf("DEBUG handle: cur=%d, v3d->lay=0x%08x, scene->lay=0x%08x, active_layer=%d\n",cur, v3d ? v3d->lay : 0, scene->lay, scene->active_layer);
 
 		WM_event_add_notifier(C, NC_SCENE | ND_LAYER, scene);
 		return;
@@ -2782,29 +2781,20 @@ void uiTemplateLayers(
 						int icon = 0;
 						bool has_objects = false;
 
-						/* Check occupancy - bitmask for 0-19, layer_links for 20+ */
-						if (sl->index < 20) {
-							/* Old bitmask check for first 20 layers */
-							for (Base *base = scene->base.first; base; base = base->next) {
-								if (base->lay & (1u << sl->index)) {
-									has_objects = true;
-									break;
-								}
+					/* Occupancy is defined by layer_links for every layer, so the UI's
+					* notion of "used" agrees with the link-based visibility predicate.
+					* Compare layer_index, not the layer pointer: the pointer is a runtime
+					* cache and goes stale if a SceneLayer is removed. */
+					for (Base *base = scene->base.first; base; base = base->next) {
+							ObjectLayerLink *link;
+							for (link = base->object->layer_links.first; link; link = link->next) {
+							if (link->layer_index == sl->index) {
+								has_objects = true;
+							break;
 							}
 						}
-						else {
-							/* Dynamic layer check via layer_links */
-							for (Base *base = scene->base.first; base; base = base->next) {
-								ObjectLayerLink *link;
-								for (link = base->object->layer_links.first; link; link = link->next) {
-									if (link->layer == sl) {
-										has_objects = true;
-										break;
-									}
-								}
-								if (has_objects) break;
-							}
-						}
+						if (has_objects) break;
+					}
 
 						/* Icon logic matching original behavior */
 						if (sl->index == scene->active_layer) {

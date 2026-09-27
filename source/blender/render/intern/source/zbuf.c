@@ -48,6 +48,7 @@
 
 #include "BKE_global.h"
 #include "BKE_material.h"
+#include "BKE_scene.h"
 
 
 #include "RE_render_ext.h"
@@ -2135,14 +2136,15 @@ void zbuffer_solid(RenderPart *pa, RenderLayer *rl, void(*fillfunc)(RenderPart *
 
 		/* regular zbuffering loop, does all sample buffers */
 		for (i=0, obi=R.instancetable.first; obi; i++, obi=obi->next) {
+			const bool ob_layer_visible = BKE_object_layer_visible(obi->ob);
 			obr= obi->obr;
 
 			/* continue happens in 2 different ways... zmaskpass only does lay_zmask stuff */
 			if (zmaskpass) {
-				if ((obi->lay & lay_zmask)==0)
+				if ((obi->lay & lay_zmask)==0 && !ob_layer_visible)
 					continue;
 			}
-			else if (!all_z && !(obi->lay & (lay|lay_zmask)))
+			else if (!all_z && !(obi->lay & (lay|lay_zmask)) && !ob_layer_visible)
 				continue;
 
 			if (obi->flag & R_TRANSFORMED)
@@ -2160,7 +2162,7 @@ void zbuffer_solid(RenderPart *pa, RenderLayer *rl, void(*fillfunc)(RenderPart *
 				else vlr++;
 
 				/* the cases: visible for render, only z values, zmask, nothing */
-				if (obi->lay & lay) {
+				if ((obi->lay & lay) || ob_layer_visible) {
 					if (vlr->mat!=ma) {
 						ma= vlr->mat;
 						nofill= (ma->mode & MA_ONLYCAST) || ((ma->mode & MA_TRANSP) && (ma->mode & MA_ZTRANSP));
@@ -2318,11 +2320,12 @@ void zbuffer_shadow(Render *re, float winmat[4][4], LampRen *lar, int *rectz, in
 	zspan.zbuffunc= zbuffillGL_onlyZ;
 
 	for (i=0, obi=re->instancetable.first; obi; i++, obi=obi->next) {
+		const bool ob_layer_visible = BKE_object_layer_visible(obi->ob);
 		obr= obi->obr;
 
 		if (obr->ob==re->excludeob)
 			continue;
-		else if (!(obi->lay & lay))
+		else if (!(obi->lay & lay) && !ob_layer_visible)
 			continue;
 
 		if (obi->flag & R_TRANSFORMED)
@@ -2348,7 +2351,7 @@ void zbuffer_shadow(Render *re, float winmat[4][4], LampRen *lar, int *rectz, in
 				if ((ma->mode2 & MA_CASTSHADOW)==0 || (ma->mode & MA_SHADBUF)==0) ok= 0;
 			}
 
-			if (ok && (obi->lay & lay) && !(vlr->flag & R_HIDDEN)) {
+			if (ok && ((obi->lay & lay) || ob_layer_visible) && !(vlr->flag & R_HIDDEN)) {
 				c1= zbuf_shadow_project(cache, vlr->v1->index, obwinmat, vlr->v1->co, ho1);
 				c2= zbuf_shadow_project(cache, vlr->v2->index, obwinmat, vlr->v2->co, ho2);
 				c3= zbuf_shadow_project(cache, vlr->v3->index, obwinmat, vlr->v3->co, ho3);
@@ -2401,7 +2404,7 @@ void zbuffer_shadow(Render *re, float winmat[4][4], LampRen *lar, int *rectz, in
 						if ((ma->mode2 & MA_CASTSHADOW)==0 || (ma->mode & MA_SHADBUF)==0) ok= 0;
 					}
 
-					if (ok && (sseg.buffer->lay & lay)) {
+					if (ok && ((sseg.buffer->lay & lay) || ob_layer_visible)) {
 						zbuf_project_cache_clear(cache, strand->totvert);
 
 						for (b=0; b<strand->totvert-1; b++, svert++) {
@@ -2560,9 +2563,10 @@ void zbuffer_sss(RenderPart *pa, unsigned int lay, void *handle, void (*func)(vo
 	}
 
 	for (i=0, obi=R.instancetable.first; obi; i++, obi=obi->next) {
+		const bool ob_layer_visible = BKE_object_layer_visible(obi->ob);
 		obr= obi->obr;
 
-		if (!(obi->lay & lay))
+		if (!(obi->lay & lay) && !ob_layer_visible)
 			continue;
 
 		if (obi->flag & R_TRANSFORMED)
@@ -2581,7 +2585,7 @@ void zbuffer_sss(RenderPart *pa, unsigned int lay, void *handle, void (*func)(vo
 
 			if (material_in_material(vlr->mat, sss_ma)) {
 				/* three cases, visible for render, only z values and nothing */
-				if (obi->lay & lay) {
+				if ((obi->lay & lay) || ob_layer_visible) {
 					if (vlr->mat!=ma) {
 						ma= vlr->mat;
 						nofill= ma->mode & MA_ONLYCAST;
@@ -2755,9 +2759,10 @@ static int zbuffer_abuf(Render *re, RenderPart *pa, APixstr *APixbuf, ListBase *
 	zvlnr= 0;
 
 	for (i=0, obi=re->instancetable.first; obi; i++, obi=obi->next) {
+		const bool ob_layer_visible = BKE_object_layer_visible(obi->ob);
 		obr= obi->obr;
 
-		if (!(obi->lay & lay))
+		if (!(obi->lay & lay) && !ob_layer_visible)
 			continue;
 
 		if (obi->flag & R_TRANSFORMED)
@@ -2784,7 +2789,7 @@ static int zbuffer_abuf(Render *re, RenderPart *pa, APixstr *APixbuf, ListBase *
 			}
 
 			if (dofill) {
-				if (!(vlr->flag & R_HIDDEN) && (obi->lay & lay)) {
+				if (!(vlr->flag & R_HIDDEN) && ((obi->lay & lay) || ob_layer_visible)) {
 					unsigned short partclip;
 
 					v1= vlr->v1;

@@ -674,12 +674,8 @@ GHOST_Context *GHOST_WindowWin32::newDrawingContext(GHOST_TDrawingContextType ty
 		        m_hWnd,
 		        m_hDC,
 #if 1
-		        0, // profile bit
-		        2, 1, // GL version requested
-#else
-		        // switch to this for Blender 2.8 development
 		        WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB,
-		        3, 2,
+		        3, 3,
 #endif
 		        (m_debug_context ? WGL_CONTEXT_DEBUG_BIT_ARB : 0),
 		        GHOST_OPENGL_WGL_RESET_NOTIFICATION_STRATEGY);

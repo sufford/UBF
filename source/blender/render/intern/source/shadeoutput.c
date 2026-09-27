@@ -32,6 +32,7 @@
 #include "BKE_colorband.h"
 #include "BKE_colortools.h"
 #include "BKE_material.h"
+#include "BKE_scene.h"
 
 #include "DNA_group_types.h"
 #include "DNA_lamp_types.h"
@@ -376,13 +377,13 @@ void renderspothalo(ShadeInput *shi, float col[4], float alpha)
 		if (lar==NULL) continue;
 
 		if (lar->type==LA_SPOT && (lar->mode & LA_HALO) && (lar->buftype != LA_SHADBUF_DEEP) && lar->haint>0) {
-
+		
 			if (lar->mode & LA_LAYER)
-				if (shi->vlr && (lar->lay & shi->obi->lay)==0)
+				if (shi->vlr && (lar->lay & shi->obi->lay)==0 && !BKE_object_layer_visible(shi->obi->ob))
 					continue;
-			if ((lar->lay & shi->lay)==0)
+			if ((lar->lay & shi->lay)==0 && !BKE_object_layer_visible(lar->ob))
 				continue;
-
+		
 			spothalo(lar, shi, &i);
 			if (i > 0.0f) {
 				const float i_alpha = i * alpha;
@@ -1614,8 +1615,11 @@ static void shade_lamp_loop_only_shadow(ShadeInput *shi, ShadeResult *shr)
 			lar= go->lampren;
 			if (lar==NULL) continue;
 
-			if (lar->mode & LA_LAYER) if ((lar->lay & shi->obi->lay)==0) continue;
-			if ((lar->lay & shi->lay)==0) continue;
+			if (lar->mode & LA_LAYER)
+				if ((lar->lay & shi->obi->lay)==0 && !BKE_object_layer_visible(shi->obi->ob))
+					continue;
+			if ((lar->lay & shi->lay)==0 && !BKE_object_layer_visible(lar->ob))
+				continue;
 
 			if (lar->shb || (lar->mode & LA_SHAD_RAY)) {
 				visifac= lamp_get_visibility(lar, shi->co, lv, &lampdist);
@@ -1856,8 +1860,11 @@ void shade_lamp_loop(ShadeInput *shi, ShadeResult *shr)
 			if (lar==NULL) continue;
 
 			/* test for lamp layer */
-			if (lar->mode & LA_LAYER) if ((lar->lay & shi->obi->lay)==0) continue;
-			if ((lar->lay & shi->lay)==0) continue;
+			if (lar->mode & LA_LAYER)
+				if ((lar->lay & shi->obi->lay)==0 && !BKE_object_layer_visible(shi->obi->ob))
+					continue;
+			if ((lar->lay & shi->lay)==0 && !BKE_object_layer_visible(lar->ob))
+				continue;
 
 			/* accumulates in shr->diff and shr->spec and shr->shad (diffuse with shadow!) */
 			shade_one_light(lar, shi, shr, passflag);
@@ -2030,8 +2037,8 @@ static float lamp_get_data_internal(ShadeInput *shi, GroupObject *go, float col[
 	float visifac, inp;
 
 	if (!lar
-	    || ((lar->mode & LA_LAYER) && (lar->lay & shi->obi->lay) == 0)
-	    || (lar->lay & shi->lay) == 0)
+		|| ((lar->mode & LA_LAYER) && (lar->lay & shi->obi->lay) == 0 && !BKE_object_layer_visible(shi->obi->ob))
+		|| ((lar->lay & shi->lay) == 0 && !BKE_object_layer_visible(lar->ob)))
 		return 0.0f;
 
 	if (lar->mode & LA_TEXTURE)

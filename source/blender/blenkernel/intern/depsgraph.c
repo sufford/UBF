@@ -1827,9 +1827,9 @@ static void flush_update_node(Main *bmain, DagNode *node, unsigned int layer, in
 	int oldflag;
 	bool changed = false;
 	unsigned int all_layer;
-
+	
 	node->lasttime = curtime;
-
+	
 	ob = node->ob;
 	if (ob && (ob->recalc & OB_RECALC_ALL)) {
 		all_layer = node->scelay;
@@ -1838,11 +1838,13 @@ static void flush_update_node(Main *bmain, DagNode *node, unsigned int layer, in
 		for (itA = node->child; itA; itA = itA->next) {
 			all_layer |= itA->lay;
 			/* the relationship is visible */
-			if ((itA->lay & layer)) { // XXX || (itA->node->ob == obedit)
+			if ((itA->lay & layer) ||
+			    (itA->node->type == ID_OB && BKE_object_layer_visible((Object *)itA->node->ob)))
+			{
 				if (itA->node->type == ID_OB) {
 					obc = itA->node->ob;
 					oldflag = obc->recalc;
-
+					
 					/* got a ob->obc relation, now check if flag needs flush */
 					if (ob->recalc & OB_RECALC_OB) {
 						if (itA->type & DAG_RL_OB_OB) {
@@ -1873,21 +1875,23 @@ static void flush_update_node(Main *bmain, DagNode *node, unsigned int layer, in
 			}
 		}
 		/* even nicer, we can clear recalc flags...  */
-		if ((all_layer & layer) == 0) { // XXX && (ob != obedit)) {
+		if ((all_layer & layer) == 0 && !BKE_object_layer_visible(ob)) {
 			/* but existing displaylists or derivedmesh should be freed */
 			if (ob->recalc & OB_RECALC_DATA)
 				BKE_object_free_derived_caches(ob);
-
+			
 			ob->recalc &= ~OB_RECALC_ALL;
 		}
 	}
-
+	
 	/* check case where child changes and parent forcing obdata to change */
 	/* should be done regardless if this ob has recalc set */
 	/* could merge this in with loop above...? (ton) */
 	for (itA = node->child; itA; itA = itA->next) {
 		/* the relationship is visible */
-		if ((itA->lay & layer)) {       // XXX  || (itA->node->ob == obedit)
+		if ((itA->lay & layer) ||
+		    (itA->node->type == ID_OB && BKE_object_layer_visible((Object *)itA->node->ob)))
+		{
 			if (itA->node->type == ID_OB) {
 				obc = itA->node->ob;
 				/* child moves */
@@ -1902,13 +1906,13 @@ static void flush_update_node(Main *bmain, DagNode *node, unsigned int layer, in
 			}
 		}
 	}
-
+	
 	/* we only go deeper if node not checked or something changed  */
 	for (itA = node->child; itA; itA = itA->next) {
 		if (changed || itA->node->lasttime != curtime)
 			flush_update_node(bmain, itA->node, layer, curtime);
 	}
-
+	
 }
 
 /* node was checked to have lasttime != curtime, and is of type ID_OB */
@@ -2552,7 +2556,7 @@ void DAG_on_visible_update(Main *bmain, const bool do_time)
 		Object *ob;
 		DagNode *node;
 		unsigned int lay = dsl->layer, oblay;
-
+		
 		/* derivedmeshes and displists are not saved to file so need to be
 		 * remade, tag them so they get remade in the scene update loop,
 		 * note armature poses or object matrices are preserved and do not
@@ -2562,12 +2566,16 @@ void DAG_on_visible_update(Main *bmain, const bool do_time)
 
 		BKE_main_id_tag_idcode(bmain, ID_GR, LIB_TAG_DOIT, false);
 
+		const bool layer_visibility_changed =
+		    (scene->layer_visibility_generation != scene->layer_visibility_generation_seen);
+		scene->layer_visibility_generation_seen = scene->layer_visibility_generation;
+
 		for (SETLOOPER(scene, sce_iter, base)) {
 			ob = base->object;
 			node = (sce_iter->theDag) ? dag_get_node(sce_iter->theDag, ob) : NULL;
 			oblay = (node) ? node->lay : ob->lay;
 
-			if ((oblay & lay) & ~scene->lay_updated) {
+			if (layer_visibility_changed || ((oblay & lay) & ~scene->lay_updated)) {
 				/* TODO(sergey): Why do we need armature here now but didn't need before? */
 				if (ELEM(ob->type, OB_MESH, OB_CURVE, OB_SURF, OB_FONT, OB_MBALL, OB_LATTICE, OB_ARMATURE)) {
 					ob->recalc |= OB_RECALC_DATA;

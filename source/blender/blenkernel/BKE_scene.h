@@ -43,6 +43,7 @@ struct SceneLayer *BKE_scene_layer_add(struct Scene *scene, const char *name);
 struct SceneLayer *BKE_scene_layer_find_index(const struct Scene *scene, const int index);
 struct SceneLayer *BKE_scene_layer_find_active(const struct Scene *scene);
 bool BKE_scene_layer_is_visible(const struct Scene *scene, const int layer_index);
+bool BKE_object_layer_visible(const struct Object *ob);
 void BKE_scene_layer_set_visible(struct Scene *scene, const int layer_index, const bool visible);
 void BKE_scene_layer_remove(struct Scene *scene, struct SceneLayer *sl);
 

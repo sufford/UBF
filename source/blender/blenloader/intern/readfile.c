@@ -4799,17 +4799,8 @@ static void lib_link_object_layer_links(Main *main, Object *ob)
 
     DAG_id_tag_update(&ob->id, OB_RECALC_OB | OB_RECALC_DATA | OB_RECALC_TIME);
 
-    if (STREQ(ob->id.name + 2, "Cube.002")) {
-        printf("DBG cube: type=%d dt=%d data=%p derivedFinal=%p derivedDeform=%p\n",
-               ob->type, ob->dt, ob->data,
-               (void*)ob->derivedFinal, (void*)ob->derivedDeform);
-    }
-
     for (link = ob->layer_links.first; link; link = link->next) {
         Scene *sce_iter;
-
-        printf("DBG relink pre: ob='%s' link=%p layer_index=%d\n",
-               ob->id.name, (void *)link, link->layer_index);
 
         link->layer = NULL;
 
@@ -4827,9 +4818,6 @@ static void lib_link_object_layer_links(Main *main, Object *ob)
         if (link->layer_index >= 0 && link->layer_index < 32) {
             ob->lay |= (1u << link->layer_index);
         }
-
-        printf("DBG relink post: ob='%s' layer_index=%d found=%p ob->lay=0x%08x\n",
-               ob->id.name, link->layer_index, (void *)link->layer, ob->lay);
     }
 }
 
@@ -6327,13 +6315,6 @@ static void direct_link_scene(FileData *fd, Scene *sce)
 
 	/* Dynamic layer list */
 	link_list(fd, &sce->layers);
-	{
-		SceneLayer *sl;
-		for (sl = sce->layers.first; sl; sl = sl->next) {
-			printf("DBG scene layers: sce='%s' sl='%s' index=%d flag=0x%x\n",
-			       sce->id.name, sl->name, sl->index, sl->flag);
-		}
-	}
 
 	direct_link_curvemapping(fd, &sce->r.mblur_shutter_curve);
 }

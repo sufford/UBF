@@ -39,6 +39,7 @@
 #include "DNA_lamp_types.h"
 
 #include "BKE_material.h"
+#include "BKE_scene.h"
 
 
 /* own module */
@@ -77,7 +78,7 @@ static void render_lighting_halo(HaloRen *har, float col_r[3])
 		lar= go->lampren;
 
 		/* test for lamplayer */
-		if (lar->mode & LA_LAYER) if ((lar->lay & har->lay)==0) continue;
+		if (lar->mode & LA_LAYER) if ((lar->lay & har->lay)==0 && !BKE_object_layer_visible(har->ob)) continue;
 
 		/* lampdist cacluation */
 		if (lar->type==LA_SUN || lar->type==LA_HEMI) {

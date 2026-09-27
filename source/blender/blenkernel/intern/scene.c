@@ -959,6 +959,8 @@ void BKE_scene_layer_set_visible(Scene *scene, const int layer_index, const bool
         sl->flag &= ~SCE_LAYER_FLAG_VISIBLE;
     }
     
+    scene->layer_visibility_generation++;   /* NEW */
+    
     /* Sync old bitmask */
     scene->lay = 0;
     for (sl = scene->layers.first; sl; sl = sl->next) {
@@ -966,6 +968,32 @@ void BKE_scene_layer_set_visible(Scene *scene, const int layer_index, const bool
             scene->lay |= (1u << sl->index);
         }
     }
+}
+
+/* True if the object is a member of at least one SceneLayer whose
+ * SCE_LAYER_FLAG_VISIBLE bit is set. Walks ob->layer_links, so it is
+ * not bounded by the 32-bit legacy mask.
+ *
+ * Note: link->layer is a runtime cache (see DNA_object_types.h); it may
+ * be NULL before lib_link_object_layer_links() has run. The stable
+ * identity is link->layer_index, but resolving that needs a Scene*,
+ * which this predicate deliberately does not take so it can be used
+ * from the BASE_VISIBLE macro family without changing call sites. */
+bool BKE_object_layer_visible(const Object *ob)
+{
+    const ObjectLayerLink *link;
+
+    if (ob == NULL) {
+        return false;
+    }
+
+    for (link = ob->layer_links.first; link; link = link->next) {
+        if (link->layer && (link->layer->flag & SCE_LAYER_FLAG_VISIBLE)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 /* Remove a SceneLayer from the list */

@@ -656,7 +656,7 @@ static void shadowbuf_autoclip(Render *re, LampRen *lar)
 				if ((ma->mode2 & MA_CASTSHADOW)==0 || (ma->mode & MA_SHADBUF)==0) ok= 0;
 			}
 
-			if (ok && (obi->lay & lay)) {
+			if (ok && ((obi->lay & lay) || BKE_object_layer_visible(obi->ob))) {
 				clipflag[vlr->v1->index]= 1;
 				clipflag[vlr->v2->index]= 1;
 				clipflag[vlr->v3->index]= 1;
@@ -2011,7 +2011,7 @@ static void isb_bsp_fillfaces(Render *re, LampRen *lar, ISBBranch *root)
 				zspanstrand.shad_alpha= zspan.shad_alpha= ma->shad_alpha;
 			}
 
-			if (ok && (obi->lay & lay)) {
+			if (ok && ((obi->lay & lay) || BKE_object_layer_visible(obi->ob))) {
 				float hoco[4][4];
 				int c1, c2, c3, c4=0;
 				int d1, d2, d3, d4=0;

@@ -59,6 +59,7 @@
 /* own include */
 #include "rendercore.h"
 
+#include "BKE_scene.h"
 
 /* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
 /* defined in pipeline.c, is hardcopy of active dynamic allocated Render */
@@ -255,7 +256,7 @@ static void halo_tile(RenderPart *pa, RenderLayer *rl)
 		har= R.sortedhalos[a];
 
 		/* layer test, clip halo with y */
-		if ((har->lay & lay) == 0) {
+		if ((har->lay & lay) == 0 && !BKE_object_layer_visible(har->ob)) {
 			/* pass */
 		}
 		else if (testrect.ymin > har->maxy) {
@@ -1971,7 +1972,7 @@ void add_halo_flare(Render *re)
 		for (a=0; a<R.tothalo; a++) {
 			har= R.sortedhalos[a];
 
-			if (har->flarec && (har->lay & rl->lay)) {
+			if (har->flarec && ((har->lay & rl->lay) || BKE_object_layer_visible(har->ob))) {
 				do_draw = true;
 				renderflare(rr, rect, har);
 			}

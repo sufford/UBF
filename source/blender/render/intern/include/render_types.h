@@ -452,6 +452,7 @@ typedef struct HaloRen {
 	float hasize;
 	int pixels;
 	unsigned int lay;
+	struct Object *ob;  /* back-pointer to the source object, for dynamic-layer checks */
 	struct Material *mat;
 	struct ImagePool *pool;
 	bool skip_load_image, texnode_preview;
@@ -579,6 +580,7 @@ typedef struct LampRen {
 	float shdwr, shdwg, shdwb;
 	float energy, haint;
 	int lay;
+	struct Object *ob;  /* back-pointer to the source lamp Object, for dynamic-layer checks */
 	float spotsi, spotbl;
 	float vec[3];
 	float xsp, ysp, distkw, inpr;

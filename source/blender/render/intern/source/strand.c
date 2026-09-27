@@ -38,6 +38,7 @@
 
 #include "BKE_DerivedMesh.h"
 #include "BKE_key.h"
+#include "BKE_scene.h"
 
 
 #include "render_types.h"
@@ -841,7 +842,7 @@ int zbuffer_strands_abuf(Render *re, RenderPart *pa, APixstrand *apixbuf, ListBa
 
 		obr= obi->obr;
 
-		if (!obr->strandbuf || !(obr->strandbuf->lay & lay))
+		if (!obr->strandbuf || (!(obr->strandbuf->lay & lay) && !BKE_object_layer_visible(obr->ob)))
 			continue;
 
 		/* compute matrix and try clipping whole object */

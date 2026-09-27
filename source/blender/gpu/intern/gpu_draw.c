@@ -2207,7 +2207,8 @@ int GPU_scene_object_lights(Scene *scene, Object *ob, int lay, float viewmat[4][
 		if (base->object->type != OB_LAMP)
 			continue;
 
-		if (!(base->lay & lay) || !(base->lay & ob->lay))
+		if (!((base->lay & lay) || BKE_object_layer_visible(base->object)) ||
+		    !((base->lay & ob->lay) || BKE_object_layer_visible(ob)))
 			continue;
 
 		Lamp *la = base->object->data;
