@@ -95,6 +95,7 @@ typedef enum ModifierType {
 	eModifierType_Squeeze           = 61, 
 	eModifierType_WaveMax			= 62,
 	eModifierType_Melt				= 63,
+	eModifierType_EditPoly			= 64,
 	NUM_MODIFIER_TYPES
 } ModifierType;
 
@@ -1822,6 +1823,22 @@ typedef struct DeleteMeshModifierData {
     ModifierData modifier;
 } DeleteMeshModifierData;
 
+typedef struct EditPolyModifierData {
+    ModifierData modifier;
 
+    /** Собственная геометрия модификатора (пока NULL — заполним позже). */
+    struct Mesh *edit_mesh;
+
+    /** Флаги состояния. */
+    int flag;
+    int pad;
+} EditPolyModifierData;
+
+/* EditPolyModifierData.flag */
+enum {
+    EDITPOLY_EDIT_MODE   = (1 << 0),
+    EDITPOLY_CACHE_VALID = (1 << 1),
+    EDITPOLY_INITIALIZED = (1 << 2),
+};
 
 #endif  /* __DNA_MODIFIER_TYPES_H__ */

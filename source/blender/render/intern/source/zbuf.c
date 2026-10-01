@@ -65,6 +65,7 @@
 
 /* own includes */
 #include "zbuf.h"
+#include "RE_Rasterizer.h"
 
 /* could enable at some point but for now there are far too many conversions */
 #ifdef __GNUC__
@@ -77,6 +78,14 @@
 extern struct Render R;
 /* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
 
+/* ★ ОТЛАДКА: дамп tie-случаев в zbuffillGL4 (равная глубина у двух примитивов) */
+static int g_tiedump = 0;
+
+void zbuf_debug_set_tiedump(int on)
+{
+	g_tiedump = on;
+}
+
 
 /* ****************** Spans ******************************* */
 
@@ -88,8 +97,10 @@ void zbuf_alloc_span(ZSpan *zspan, int rectx, int recty, float clipcrop)
 	zspan->rectx= rectx;
 	zspan->recty= recty;
 
-	zspan->span1= MEM_mallocN(recty*sizeof(float), "zspan");
-	zspan->span2= MEM_mallocN(recty*sizeof(float), "zspan");
+	/* ★ callocN: span[] читаются в span-correction, обнуление убирает
+	 * зависимость результата от содержимого свежей памяти */
+	zspan->span1= MEM_callocN(recty*sizeof(float), "zspan");
+	zspan->span2= MEM_callocN(recty*sizeof(float), "zspan");
 
 	zspan->clipcrop= clipcrop;
 }
@@ -356,7 +367,7 @@ static void zbuffillAc4(ZSpan *zspan, int obi, int zvlnr,
 	mask= zspan->mask;
 
 	/* correct span */
-	sn1= (my0 + my2)/2;
+	sn1= my0;  /* ★ не читаем span[] вне [my0..my2] */
 	if (zspan->span1[sn1] < zspan->span2[sn1]) {
 		span1= zspan->span1+my2;
 		span2= zspan->span2+my2;
@@ -1051,6 +1062,7 @@ static void zbuffillGLinv4(ZSpan *zspan, int obi, int zvlnr,
 	int *rz, x, y;
 	int sn1, sn2, rectx, *rectzofs, my0, my2;
 
+
 	/* init */
 	zbuf_init_span(zspan);
 
@@ -1101,7 +1113,7 @@ static void zbuffillGLinv4(ZSpan *zspan, int obi, int zvlnr,
 	rectmaskofs= (zspan->rectmask+rectx*my2);
 
 	/* correct span */
-	sn1= (my0 + my2)/2;
+	sn1= my0;  /* ★ не читаем span[] вне [my0..my2] */
 	if (zspan->span1[sn1] < zspan->span2[sn1]) {
 		span1= zspan->span1+my2;
 		span2= zspan->span2+my2;
@@ -1161,8 +1173,8 @@ static void zbuffillGLinv4(ZSpan *zspan, int obi, int zvlnr,
 
 /* WATCH IT: zbuffillGLinv4 and zbuffillGL4 are identical except for a 2 lines,
  * commented below */
-static void zbuffillGL4(ZSpan *zspan, int obi, int zvlnr,
-                        const float *v1, const float *v2, const float *v3, const float *v4)
+void zbuffillGL4(ZSpan *zspan, int obi, int zvlnr,
+                 const float *v1, const float *v2, const float *v3, const float *v4)
 {
 	double zxd, zyd, zy0, zverg;
 	float x0, y0, z0;
@@ -1173,6 +1185,24 @@ static void zbuffillGL4(ZSpan *zspan, int obi, int zvlnr,
 	const int *rectmaskofs, *rm;
 	int *rz, x, y;
 	int sn1, sn2, rectx, *rectzofs, my0, my2;
+	/* ★ ОТЛАДКА: не указывает ли вход в выходной буфер плитки (перекрытие) */
+	if (getenv("UBF_STACK")) {
+		intptr_t lo = (intptr_t)zspan->rectz, hi = lo + (intptr_t)zspan->rectx * zspan->recty * 4;
+		printf("[INPUT] zvlnr=%d v1=%p v2=%p v3=%p rectp=%p rectz=%p inbuf=%d\n",
+		       zvlnr, (const void *)v1, (const void *)v2, (const void *)v3,
+		       (void *)zspan->rectp, (void *)zspan->rectz,
+		       (((intptr_t)v1 >= lo && (intptr_t)v1 < hi) ||
+		        ((intptr_t)v2 >= lo && (intptr_t)v2 < hi) ||
+		        ((intptr_t)v3 >= lo && (intptr_t)v3 < hi)) ? 1 : 0);
+	}
+	/* ★ ОТЛАДКА: побитовый дамп входа zbuffillGL4 */
+	if (getenv("UBF_FDUMP2")) {
+		printf("[FDUMP2] zvlnr=%d v4=%d v1=(%08x,%08x,%08x) v2=(%08x,%08x,%08x) v3=(%08x,%08x,%08x)\n",
+		       zvlnr, v4 ? 1 : 0,
+		       *(const unsigned int *)&v1[0], *(const unsigned int *)&v1[1], *(const unsigned int *)&v1[2],
+		       *(const unsigned int *)&v2[0], *(const unsigned int *)&v2[1], *(const unsigned int *)&v2[2],
+		       *(const unsigned int *)&v3[0], *(const unsigned int *)&v3[1], *(const unsigned int *)&v3[2]);
+	}
 
 	/* init */
 	zbuf_init_span(zspan);
@@ -1224,7 +1254,7 @@ static void zbuffillGL4(ZSpan *zspan, int obi, int zvlnr,
 	rectmaskofs= (zspan->rectmask+rectx*my2);
 
 	/* correct span */
-	sn1= (my0 + my2)/2;
+	sn1= my0;  /* ★ не читаем span[] вне [my0..my2] */
 	if (zspan->span1[sn1] < zspan->span2[sn1]) {
 		span1= zspan->span1+my2;
 		span2= zspan->span2+my2;
@@ -1255,6 +1285,14 @@ static void zbuffillGL4(ZSpan *zspan, int obi, int zvlnr,
 
 			while (x>=0) {
 				intzverg = round_db_to_int_clamp(zverg);
+
+				/* ★ ОТЛАДКА: фиксируем tie-случаи (равная глубина).
+				 * При строгом '<' tie не перезаписывает пиксель, значит
+				 * результат не должен зависеть от порядка отрисовки. */
+				if (g_tiedump && intzverg == *rz && *rp != 0 && *rp != zvlnr) {
+					printf("[TIE] zvlnr=%d prev=%d z=%d x=%d y=%d\n",
+					       zvlnr, *rp, intzverg, sn1 + (sn2 - sn1 - x), y);
+				}
 
 				if (intzverg < *rz) { /* ONLY UNIQUE LINE: see comment above */
 					if (!zspan->rectmask || intzverg > *rm) {
@@ -1351,7 +1389,7 @@ static void zbuffillGL_onlyZ(ZSpan *zspan, int UNUSED(obi), int UNUSED(zvlnr),
 		rectzofs1= (zspan->rectz1+rectx*my2);
 
 	/* correct span */
-	sn1= (my0 + my2)/2;
+	sn1= my0;  /* ★ не читаем span[] вне [my0..my2] */
 	if (zspan->span1[sn1] < zspan->span2[sn1]) {
 		span1= zspan->span1+my2;
 		span2= zspan->span2+my2;
@@ -1468,7 +1506,7 @@ void zspan_scanconvert_strand(ZSpan *zspan, void *handle, float *v1, float *v2, 
 	vy0= ((double)my2)*vyd + (double)xx1;
 
 	/* correct span */
-	sn1= (my0 + my2)/2;
+	sn1= my0;  /* ★ не читаем span[] вне [my0..my2] */
 	if (zspan->span1[sn1] < zspan->span2[sn1]) {
 		span1= zspan->span1+my2;
 		span2= zspan->span2+my2;
@@ -2049,6 +2087,15 @@ static void zmask_rect(int *rectz, int *rectp, int xs, int ys, int neg)
 
 void zbuffer_solid(RenderPart *pa, RenderLayer *rl, void(*fillfunc)(RenderPart *, ZSpan *, int, void *), void *data)
 {
+	if (RE_rasterizer_enabled(&R) && R.rasterizer) {
+		printf("[RASTERIZER] zbuffer_solid -> rasterizer (part %d, %dx%d)\n",
+		       pa->nr, pa->rectx, pa->recty);
+		RE_rasterizer_render_part(R.rasterizer, pa, rl);
+		if (fillfunc)
+			fillfunc(pa, NULL, pa->sample, data);
+		return;
+	}
+	
 	ZbufProjectCache cache[ZBUF_PROJECT_CACHE_SIZE];
 	ZSpan zspans[16], *zspan; /* 16 = RE_MAX_OSA */
 	VlakRen *vlr= NULL;
@@ -2491,7 +2538,7 @@ static void zbuffill_sss(ZSpan *zspan, int obi, int zvlnr,
 	zy0= ((double)my2)*zyd + (double)xx1;
 
 	/* correct span */
-	sn1= (my0 + my2)/2;
+	sn1= my0;  /* ★ не читаем span[] вне [my0..my2] */
 	if (zspan->span1[sn1] < zspan->span2[sn1]) {
 		span1= zspan->span1+my2;
 		span2= zspan->span2+my2;

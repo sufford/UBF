@@ -266,4 +266,7 @@ void TRANSFORM_OT_vertex_random(struct wmOperatorType *ot);
 void OBJECT_OT_data_transfer(struct wmOperatorType *ot);
 void OBJECT_OT_datalayout_transfer(struct wmOperatorType *ot);
 
+/* edit poly */
+void OBJECT_OT_editpoly_reset(struct wmOperatorType *ot);
+
 #endif /* __OBJECT_INTERN_H__ */

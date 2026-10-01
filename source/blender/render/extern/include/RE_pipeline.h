@@ -271,7 +271,9 @@ void RE_DataBase_IncrementalView(struct Render *re, float viewmat[4][4], int res
 /* set the render threads based on the commandline and autothreads setting */
 void RE_init_threadcount(Render *re);
 
-/* the main processor, assumes all was set OK! */
+/* the main processor, assumes all was set OK!
+ * Растеризатор (custom fork): scene строится и видимость фиксируется здесь —
+ * так покрываются и do_render_3d, и viewport Rendered. */
 void RE_TileProcessor(struct Render *re);
 
 bool RE_WriteRenderViewsImage(

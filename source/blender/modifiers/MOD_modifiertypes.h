@@ -90,6 +90,7 @@ extern ModifierTypeInfo modifierType_Taper;
 extern ModifierTypeInfo modifierType_Squeeze;
 extern ModifierTypeInfo modifierType_WaveMax;
 extern ModifierTypeInfo modifierType_Melt;
+extern ModifierTypeInfo modifierType_EditPoly;
 
 /* MOD_util.c */
 void modifier_type_init(ModifierTypeInfo *types[]);

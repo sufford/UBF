@@ -85,6 +85,9 @@ set(SRC
 	intern/source/volumetric.c
 	intern/source/voxeldata.c
 	intern/source/zbuf.c
+	intern/source/RE_Rasterizer.c
+	intern/source/RE_RasterScene.c
+	intern/source/RE_StorageScanline.c
 
 	extern/include/RE_bake.h
 	extern/include/RE_engine.h

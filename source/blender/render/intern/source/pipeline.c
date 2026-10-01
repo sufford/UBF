@@ -96,6 +96,7 @@
 #include "initrender.h"
 #include "pixelblending.h"
 #include "zbuf.h"
+#include "RE_Rasterizer.h"
 
 /* render flow
  *
@@ -574,6 +575,12 @@ void RE_FreeRender(Render *re)
 {
 	if (re->engine)
 		RE_engine_free(re->engine);
+	
+	/* software rasterizer (custom fork) — до RE_Database_Free() */
+	if (re->rasterizer) {
+		RE_rasterizer_free(re->rasterizer);
+		re->rasterizer = NULL;
+	}
 
 	BLI_rw_mutex_end(&re->resultmutex);
 	BLI_rw_mutex_end(&re->partsmutex);
@@ -858,6 +865,40 @@ void RE_InitState(Render *re, Render *source, RenderData *rd,
 	BLI_rw_mutex_unlock(&re->resultmutex);
 
 	re->mblur_offs = re->field_offs = 0.f;
+
+	/* ★ ОТЛАДКА: хеш матриц вида на момент инициализации состояния */
+	if (getenv("UBF_MDUMP")) {
+		unsigned int hv = 2166136261u, hw = 2166136261u;
+		const unsigned char *pv = (const unsigned char *)re->viewmat;
+		const unsigned char *pw = (const unsigned char *)re->winmat;
+		int k;
+		for (k = 0; k < 64; k++) {
+			hv = (hv ^ pv[k]) * 16777619u;
+			hw = (hw ^ pw[k]) * 16777619u;
+		}
+		printf("[MDUMP] InitState viewmat=%08x winmat=%08x viewmat00=%.9g winmat00=%.9g\n",
+		       hv, hw, (double)((const float *)re->viewmat)[0],
+		       (double)((const float *)re->winmat)[0]);
+	}
+	
+		/* software rasterizer (custom fork) — TODO: ВРЕМЕННЫЙ ХАРДКОД */
+	re->r.rasterizer_mode = RE_RASTERIZER_SCANLINE;
+	if (re->r.rasterizer_mode != RE_RASTERIZER_OFF) {
+		RE_RasterStorageType type = RE_STORAGE_SCANLINE;
+
+		if (re->r.rasterizer_mode == RE_RASTERIZER_EDGE)
+			type = RE_STORAGE_EDGE;
+		else if (re->r.rasterizer_mode == RE_RASTERIZER_TILED)
+			type = RE_STORAGE_TILED;
+
+		re->rasterizer = RE_rasterizer_create(re, type);
+		if (re->rasterizer) {
+			/* scene будет построена в do_render_3d после RE_Database_FromScene */
+			printf("[RASTERIZER] created, mode=%d\n", re->r.rasterizer_mode);
+		} else {
+			printf("[RASTERIZER] create FAILED\n");
+		}
+	}
 
 	RE_init_threadcount(re);
 }
@@ -1378,6 +1419,26 @@ static void main_render_result_new(Render *re)
 	}
 }
 
+/* ★ Растеризатор (custom fork): построить scene и зафиксировать видимость слотов
+ * ОДИН РАЗ, на главном потоке, до старта плиток. Раньше это делалось внутри
+ * RE_rasterizer_render_part() из каждого потока на каждую плитку — запись в
+ * общие slot->visible / rasty->last_material была гонкой (см.
+ * HANDOFF_RASTERIZER.md). Вызывается из обеих точек входа: threaded_tile_processor
+ * (F12) и RE_TileProcessor (viewport Rendered, envmap, SSS). */
+static void rasterizer_prepare(Render *re)
+{
+	if (re->rasterizer && !re->rasterizer->scene) {
+		re->rasterizer->scene = RE_raster_scene_build(re->rasterizer);
+		printf("[RASTERIZER] scene built: buckets=%d\n",
+		       re->rasterizer->scene ? re->rasterizer->scene->num_buckets : 0);
+	}
+	if (re->rasterizer && re->rasterizer->scene) {
+		RenderLayer *rl_vis = render_get_active_layer(re, re->result);
+		if (rl_vis)
+			RE_raster_scene_update_visibility(re->rasterizer->scene, re, rl_vis);
+	}
+}
+
 static void threaded_tile_processor(Render *re)
 {
 	RenderThread thread[BLENDER_MAX_THREADS];
@@ -1393,6 +1454,9 @@ static void threaded_tile_processor(Render *re)
 
 	/* warning; no return here without closing exr file */
 	RE_parts_init(re, true);
+
+	/* ★ растеризатор: scene + видимость, один раз до потоков */
+	rasterizer_prepare(re);
 
 	/* assuming no new data gets added to dbase... */
 	R = *re;
@@ -1412,6 +1476,14 @@ static void threaded_tile_processor(Render *re)
 		BLI_thread_queue_nowait(workqueue);
 
 		/* start all threads */
+		/* ★ ВРЕМЕННО: UBF_T1=1 форсирует один поток рендера.
+		 * Нужно для воспроизводимых сравнений с BI (A/B): при одном потоке
+		 * результат растеризатора побитово стабилен, при нескольких — нет
+		 * (см. HANDOFF_RASTERIZER.md, раздел про недетерминизм). */
+		if (getenv("UBF_T1")) {
+			re->r.threads = 1;
+			printf("[PIPE] UBF_T1: re->r.threads forced to 1\n");
+		}
 		BLI_threadpool_init(&threads, do_render_thread, re->r.threads);
 
 		for (a = 0; a < re->r.threads; a++) {
@@ -1518,6 +1590,13 @@ static void free_all_freestyle_renders(void);
 void RE_TileProcessor(Render *re)
 {
 	main_render_result_new(re);
+
+	/* ★ Растеризатор: сюда приходят пути, которые не идут через
+	 * do_render_3d — прежде всего viewport Rendered
+	 * (editors/render/render_internal.c), а также envmap и SSS.
+	 * Раньше в них scene растеризатора не строилась вообще. */
+	rasterizer_prepare(re);
+
 	threaded_tile_processor(re);
 
 	re->i.lastframetime = PIL_check_seconds_timer() - re->i.starttime;
@@ -1591,11 +1670,18 @@ static void do_render_3d(Render *re)
 			RE_Database_FromScene(re, re->main, re->scene, re->lay, 1);
 			RE_Database_Preprocess(re);
 		}
+		/* ★ scene растеризатора НЕ освобождаем здесь: она строится внутри
+		 * RE_TileProcessor уже после базы, а освобождается в RE_Database_Free
+		 * (следующая итерация/кадр). */
+
 
 		/* clear UI drawing locks */
 		if (re->draw_lock)
 			re->draw_lock(re->dlh, 0);
-
+		
+		/* software rasterizer (custom fork): scene строится и видимость
+		 * фиксируется в RE_TileProcessor, куда приходят все пути,
+		 * включая viewport Rendered */
 		threaded_tile_processor(re);
 
 #ifdef WITH_FREESTYLE
@@ -1609,8 +1695,9 @@ static void do_render_3d(Render *re)
 		if (re->flag & R_HALO)
 			if (!re->test_break(re->tbh))
 				add_halo_flare(re);
-
-		/* free all render verts etc */
+		
+		/* free all render verts etc (scene растеризатора освобождается
+		 * внутри RE_Database_Free — до разбора базы) */
 		RE_Database_Free(re);
 	}
 

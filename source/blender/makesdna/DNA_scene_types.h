@@ -784,6 +784,10 @@ typedef struct RenderData {
 
 	/* Motion blur shutter */
 	struct CurveMapping mblur_shutter_curve;
+
+	/* custom fork: software rasterizer mode */
+	int rasterizer_mode;
+	int pad_rasterizer;    /* ← добавить эту строку */
 } RenderData;
 
 /* *************************************************************** */
@@ -1663,7 +1667,8 @@ typedef struct Scene {
 	struct Object *obedit;		/* name replaces old G.obedit */
 
 	float cursor[3];			/* 3d cursor location */
-	char _pad[4];
+	float twcent[3];			/* OBSOLETE - keep for compatibility */
+	float twmin[3], twmax[3];	/* OBSOLETE - keep for compatibility */
 
 	unsigned int lay;			/* bitflags for layer visibility */
 	int layact;		/* active layer */
@@ -1879,6 +1884,12 @@ enum {
 #define R_ADDSKY		0
 #define R_ALPHAPREMUL	1
 /*#define R_ALPHAKEY		2*/ /* deprecated, shouldn't be used */
+
+/* RenderData.rasterizer_mode (custom fork) */
+#define RE_RASTERIZER_OFF       0
+#define RE_RASTERIZER_SCANLINE  1
+#define RE_RASTERIZER_EDGE      2
+#define RE_RASTERIZER_TILED     3
 
 /* RenderData.color_mgt_flag */
 enum {

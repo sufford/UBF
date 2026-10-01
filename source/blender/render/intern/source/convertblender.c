@@ -94,6 +94,7 @@
 #include "sss.h"
 #include "zbuf.h"
 #include "sunsky.h"
+#include "RE_Rasterizer.h"
 
 /* 10 times larger than normal epsilon, test it on default nurbs sphere with ray_transp (for quad detection) */
 /* or for checking vertex normal flips */
@@ -4775,6 +4776,17 @@ void RE_Database_Free(Render *re)
 {
 	LampRen *lar;
 
+	/* ★ Растеризатор: scene хранит указатели в базу (slot->obi →
+	 * ObjectInstanceRen), поэтому её надо освободить ДО разбора базы.
+	 * Делаем это до раннего return ниже — иначе при неполной базе scene
+	 * останется висеть на освобождённых указателях.
+	 * Следующий rasterizer_prepare() (threaded_tile_processor/RE_TileProcessor)
+	 * построит её заново. */
+	if (re->rasterizer && re->rasterizer->scene) {
+		RE_raster_scene_free(re->rasterizer->scene);
+		re->rasterizer->scene = NULL;
+	}
+
 	/* will crash if we try to free empty database */
 	if (!re->i.convertdone)
 		return;
@@ -5027,6 +5039,9 @@ static void database_init_objects(Render *re, unsigned int renderlay, int nolamp
 		 * save a lot of time in complex scenes */
 		vectorlay= get_vector_renderlayers(re->scene);
 		lay= (timeoffset)? renderlay & vectorlay: renderlay;
+		
+		printf("[DB] obj='%s' type=%d base.lay=0x%x re->lay=0x%x visible=%d\n",
+       ob->id.name + 2, ob->type, base->lay, lay, BKE_object_layer_visible(ob));
 
 		/* if the object has been restricted from rendering in the outliner, ignore it */
 		if (is_object_restricted(re, ob)) continue;
@@ -5173,6 +5188,9 @@ static void database_init_objects(Render *re, unsigned int renderlay, int nolamp
 	for (group= re->main->group.first; group; group=group->id.next)
 		add_group_render_dupli_obs(re, group, nolamps, onlyselected, actob, timeoffset, 0);
 
+	printf("[DB] AFTER loop: objecttable.first=%p totinstance=%d\n",
+       (void*)re->objecttable.first, re->totinstance);
+	
 	if (!re->test_break(re->tbh))
 		RE_makeRenderInstances(re);
 }

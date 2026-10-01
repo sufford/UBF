@@ -60,6 +60,7 @@ set(SRC
 	object_transform.c
 	object_vgroup.c
 	object_warp.c
+	object_editpoly.c
 
 	object_intern.h
 )

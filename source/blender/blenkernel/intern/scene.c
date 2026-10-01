@@ -987,8 +987,16 @@ bool BKE_object_layer_visible(const Object *ob)
         return false;
     }
 
+    /* ★ ВРЕМЕННЫЙ ФИКС: если объект ещё не привязан ни к одному
+     * SceneLayer (layer_links пуст), считаем его видимым, чтобы рендер
+     * не блокировался. Правильная привязка будет добавлена позже. */
+    if (BLI_listbase_is_empty(&ob->layer_links)) {
+        return true;
+    }
+
     for (link = ob->layer_links.first; link; link = link->next) {
-        if (link->layer && (link->layer->flag & SCE_LAYER_FLAG_VISIBLE)) {
+        SceneLayer *sl = (SceneLayer *)link->layer;
+        if (sl && (sl->flag & SCE_LAYER_FLAG_VISIBLE)) {
             return true;
         }
     }

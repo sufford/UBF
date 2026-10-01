@@ -57,6 +57,9 @@
 #include "WM_types.h"
 
 const EnumPropertyItem rna_enum_object_modifier_type_items[] = {
+	{0, "", 0, N_("Edit Mesh"), ""},
+	{eModifierType_EditPoly, "EDIT_POLY", ICON_MESH_DATA, "Edit Poly", "Non-destructive Edit Poly (3ds Max style)"},
+	
 	{0, "", 0, N_("Modify"), ""},
 	{eModifierType_DataTransfer, "DATA_TRANSFER", ICON_MOD_DATA_TRANSFER, "Data Transfer", ""},
 	{eModifierType_MeshCache, "MESH_CACHE", ICON_MOD_MESHDEFORM, "Mesh Cache", ""},
@@ -5512,6 +5515,17 @@ static void rna_def_modifier_melt(BlenderRNA *brna)
     RNA_def_property_update(prop, 0, "rna_Modifier_update");
 }
 
+static void rna_def_modifier_editpoly(BlenderRNA *brna)
+{
+    StructRNA *srna;
+
+    srna = RNA_def_struct(brna, "EditPolyModifier", "Modifier");
+    RNA_def_struct_ui_text(srna, "Edit Poly Modifier",
+                           "Non-destructive Edit Poly modifier (3ds Max style)");
+    RNA_def_struct_sdna(srna, "EditPolyModifierData");
+    RNA_def_struct_ui_icon(srna, ICON_MESH_DATA);
+}
+
 
 
 void RNA_def_modifier(BlenderRNA *brna)
@@ -5642,6 +5656,7 @@ void RNA_def_modifier(BlenderRNA *brna)
 	rna_def_modifier_squeeze(brna);
 	rna_def_modifier_wavemax(brna);
 	rna_def_modifier_melt(brna);
+	rna_def_modifier_editpoly(brna);
 }
 
 #endif

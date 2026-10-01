@@ -28,6 +28,7 @@
 #include <float.h>
 #include <string.h>
 #include <assert.h>
+#include <stdlib.h>
 
 /* External modules: */
 #include "MEM_guardedalloc.h"
@@ -1367,17 +1368,65 @@ void zbufshade_tile(RenderPart *pa)
 				if (R.occlusiontree)
 					cache_occ_samples(&R, pa, &ssamp);
 
+				/* ★ ДИАГНОСТИКА: сводка "кто выиграл" по плитке (раз на плитку) */
+				if (getenv("UBF_TILE_DUMP")) {
+					int c0 = 0, c1 = 0, cnone = 0, k;
+					for (k = 0; k < pa->rectx * pa->recty; k++) {
+						if (pa->rectp[k] == 0) cnone++;
+						else if (pa->recto[k] == 0) c0++;
+						else c1++;
+					}
+					printf("[TILE] xmin=%d ymin=%d px=%d: empty=%d obi0=%d obi1=%d\n",
+					       pa->disprect.xmin, pa->disprect.ymin,
+					       pa->rectx * pa->recty, cnone, c0, c1);
+				}
+
 				for (y=pa->disprect.ymin; y<pa->disprect.ymax; y++, rr->renrect.ymax++) {
 					for (x=pa->disprect.xmin; x<pa->disprect.xmax; x++, ro++, rz++, rp++, fcol+=4, offs++) {
 						/* per pixel fixed seed */
-						BLI_thread_srandom(pa->thread, seed++);
+						/* ★ ЭКСПЕРИМЕНТ: убираем зависимость RNG от номера потока */
+						BLI_thread_srandom(getenv("UBF_RNG0") ? 0 : pa->thread, seed++);
+
+						/* ★ НОВОЕ [SCAN]: заполняется ли zbuffer вообще */
+						{
+							static int scan_total = 0, scan_nonzero = 0, scan_done = 0;
+							if (!scan_done) {
+								if (scan_total < 20) {
+									printf("[SCAN] pixel (%d,%d): rp=%d ro=%d rz=%d\n",
+									       x, y, *rp, *ro, *rz);
+									scan_total++;
+									if (*rp != 0) scan_nonzero++;
+								}
+								else {
+									printf("[SCAN] SUMMARY: nonzero=%d of %d sampled\n",
+									       scan_nonzero, scan_total);
+									scan_done = 1;
+								}
+							}
+						}
 
 						if (*rp) {
-							ps.obi= *ro;
-							ps.facenr= *rp;
-							ps.z= *rz;
+							ps.obi = *ro;
+							ps.facenr = *rp;
+							ps.z = *rz;
+
+							/* ★ ОТЛАДКА */
+							static int dbg_count = 0;
+							if (dbg_count < 5) {
+								printf("[SHADE] pixel (%d,%d): obi=%d facenr=%d z=%d\n",
+									x, y, ps.obi, ps.facenr, ps.z);
+								dbg_count++;
+							}
+
 							if (shade_samples(&ssamp, &ps, x, y)) {
-								/* combined and passes */
+								/* ★ ОТЛАДКА */
+								static int shade_ok = 0;
+								if (shade_ok < 5) {
+									printf("[SHADE] OK: combined=(%f,%f,%f,%f)\n",
+										ssamp.shr->combined[0], ssamp.shr->combined[1],
+										ssamp.shr->combined[2], ssamp.shr->combined[3]);
+									shade_ok++;
+								}
 								add_passes(rl, offs, ssamp.shi, ssamp.shr);
 							}
 						}

@@ -59,6 +59,7 @@ struct RenderEngine;
 struct ReportList;
 struct VertTableNode;
 struct VlakTableNode;
+struct RE_Rasterizer;
 
 #define TABLEINITSIZE 1024
 
@@ -273,6 +274,9 @@ struct Render {
 
 	void **movie_ctx_arr;
 	char viewname[MAX_NAME];
+	
+	/* software rasterizer (custom fork) */
+	struct RE_Rasterizer *rasterizer;
 	
 	/* Multi-threading support for ReInternal */
 	ThreadMutex tile_mutex;          // Protects tile scheduling

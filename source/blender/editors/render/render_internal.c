@@ -1345,6 +1345,9 @@ static void render_view3d_startjob(void *customdata, short *stop, short *do_upda
 				render_update_resolution(re, rp, use_border, &cliprct);
 			}
 
+			/* software rasterizer (custom fork): scene строится и видимость
+			 * фиксируется внутри RE_TileProcessor — без этого в viewport
+			 * Rendered растеризатор не включался. */
 			RE_TileProcessor(re);
 
 			first_time = false;

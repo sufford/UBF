@@ -292,5 +292,6 @@ void modifier_type_init(ModifierTypeInfo *types[])
 	INIT_TYPE(Squeeze);
 	INIT_TYPE(WaveMax);
 	INIT_TYPE(Melt);
+	INIT_TYPE(EditPoly);
 #undef INIT_TYPE
 }

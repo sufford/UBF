@@ -33,6 +33,9 @@ struct ZSpan;
 
 void fillrect(int *rect, int x, int y, int val);
 
+/* ★ ОТЛАДКА: дамп tie-случаев (равная глубина) в zbuffillGL4 */
+void zbuf_debug_set_tiedump(int on);
+
 /**
  * Converts a world coordinate into a homogeneous coordinate in view
  * coordinates.
@@ -135,5 +138,9 @@ void zbuf_render_project(float winmat[4][4], const float co[3], float ho[4]);
 void hoco_to_zco(ZSpan *zspan, float zco[3], const float hoco[4]);
 void zspan_scanconvert_strand(ZSpan *zspan, void *handle, float *v1, float *v2, float *v3, void (*func)(void *, int, int, float, float, float) );
 void zbufsinglewire(ZSpan *zspan, int obi, int zvlnr, const float ho1[4], const float ho2[4]);
+
+/* exported from zbuf.c (custom fork) */
+void zbuffillGL4(ZSpan *zspan, int obi, int zvlnr,
+                 const float *v1, const float *v2, const float *v3, const float *v4);
 
 #endif

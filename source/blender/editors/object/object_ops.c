@@ -244,6 +244,8 @@ void ED_operatortypes_object(void)
 	WM_operatortype_append(OBJECT_OT_data_transfer);
 	WM_operatortype_append(OBJECT_OT_datalayout_transfer);
 	WM_operatortype_append(OBJECT_OT_surfacedeform_bind);
+	
+	WM_operatortype_append(OBJECT_OT_editpoly_reset);
 }
 
 void ED_operatormacros_object(void)
