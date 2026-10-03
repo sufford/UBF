@@ -5769,6 +5769,16 @@ static void rna_def_scene_render_data(BlenderRNA *brna)
 		{0, NULL, 0, NULL, NULL}
 	};
 
+	/* custom fork: software rasterizer.
+	 * RE_RASTERIZER_EDGE/TILED пока падают в scanline (RE_storage_create),
+	 * поэтому в UI они не выставлены. */
+	static const EnumPropertyItem rasterizer_mode_items[] = {
+		{RE_RASTERIZER_OFF, "OFF", 0, "Off", "Use the built-in rasterizer"},
+		{RE_RASTERIZER_SCANLINE, "SCANLINE", 0, "Scanline",
+		 "Use the software rasterizer (scanline storage)"},
+		{0, NULL, 0, NULL, NULL}
+	};
+
 	static const EnumPropertyItem freestyle_thickness_items[] = {
 		{R_LINE_THICKNESS_ABSOLUTE, "ABSOLUTE", 0, "Absolute", "Specify unit line thickness in pixels"},
 		{R_LINE_THICKNESS_RELATIVE, "RELATIVE", 0, "Relative",
@@ -6060,6 +6070,14 @@ static void rna_def_scene_render_data(BlenderRNA *brna)
 	RNA_def_property_enum_items(prop, threads_mode_items);
 	RNA_def_property_enum_funcs(prop, "rna_RenderSettings_threads_mode_get", NULL, NULL);
 	RNA_def_property_ui_text(prop, "Threads Mode", "Determine the amount of render threads used");
+	RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, NULL);
+
+	/* custom fork: software rasterizer */
+	prop = RNA_def_property(srna, "rasterizer_mode", PROP_ENUM, PROP_NONE);
+	RNA_def_property_enum_sdna(prop, NULL, "rasterizer_mode");
+	RNA_def_property_enum_items(prop, rasterizer_mode_items);
+	RNA_def_property_ui_text(prop, "Rasterizer",
+	                         "Which rasterizer to use for F12 renders and the Rendered viewport");
 	RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, NULL);
 
 	/* motion blur */

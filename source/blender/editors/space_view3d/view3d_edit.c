@@ -4727,7 +4727,7 @@ void VIEW3D_OT_enable_manipulator(wmOperatorType *ot)
 static int toggle_render_exec(bContext *C, wmOperator *UNUSED(op))
 {
 	View3D *v3d = CTX_wm_view3d(C);
-	if (v3d->drawtype == OB_RENDER) {
+	if (OB_DRAWTYPE_IS_RENDER(v3d->drawtype)) {
 		v3d->drawtype = v3d->prev_drawtype;
 	}
 	else {

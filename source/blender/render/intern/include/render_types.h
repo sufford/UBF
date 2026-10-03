@@ -100,6 +100,13 @@ typedef struct RenderPart {
 	int *rectbackz;					/* zbuffer for backside sss */
 	intptr_t *rectall;					/* buffer for all faces for sss */
 
+	/* ★ ШАГ 3a: G-буфер части — позиция и нормаль в view space, как
+	 * ShadeInput::co / ::vn. 3 float на пиксель каждый, part-local.
+	 * Владелец — часть (per-thread), общей памяти между потоками нет.
+	 * NULL, пока свой шейдер выключен (гейт UBF_SHADER). */
+	float *gbuf_co;
+	float *gbuf_vn;
+
 	rcti disprect;					/* part coordinates within total picture */
 	int rectx, recty;				/* the size */
 	int nr;							/* nr is partnr */

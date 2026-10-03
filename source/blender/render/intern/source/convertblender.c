@@ -5032,16 +5032,13 @@ static void database_init_objects(Render *re, unsigned int renderlay, int nolamp
 	}
 
 	for (SETLOOPER(re->scene, sce_iter, base)) {
-		ob= base->object;
+		ob = base->object;
 
 		/* in the prev/next pass for making speed vectors, avoid creating
 		 * objects that are not on a renderlayer with a vector pass, can
 		 * save a lot of time in complex scenes */
-		vectorlay= get_vector_renderlayers(re->scene);
-		lay= (timeoffset)? renderlay & vectorlay: renderlay;
-		
-		printf("[DB] obj='%s' type=%d base.lay=0x%x re->lay=0x%x visible=%d\n",
-       ob->id.name + 2, ob->type, base->lay, lay, BKE_object_layer_visible(ob));
+		vectorlay = get_vector_renderlayers(re->scene);
+		lay = (timeoffset) ? renderlay & vectorlay : renderlay;
 
 		/* if the object has been restricted from rendering in the outliner, ignore it */
 		if (is_object_restricted(re, ob)) continue;
@@ -5057,7 +5054,17 @@ static void database_init_objects(Render *re, unsigned int renderlay, int nolamp
 				}
 			}
 		}
-		else if (BKE_object_layer_visible(ob) || (base->lay & lay) || (ob->type==OB_LAMP && (base->lay & re->lay)) ) {
+		else if ((base->lay & lay) ||
+			(ob->type == OB_LAMP && (base->lay & re->lay)) ||
+			/* R_BUTS_PREVIEW изолирует объект поддельным битом слоя
+			 * (render_preview.c), динамические слои там учитывать нельзя.
+			 * R_VIEWPORT_PREVIEW — наоборот: маска вьюпорта не выражает
+			 * динамические слои с индексом >= 32 (они не попадают ни в
+			 * ob->lay, ни в scene->lay, см. object_dynamic_layer_update_bitmask),
+			 * поэтому без этого предиката объект молча выпадает из превью
+			 * и вьюпорт показывает один фон. Solid и F12 его уже учитывают
+			 * (gpu_draw.c, depsgraph.c). */
+			(re->r.scemode & R_BUTS_PREVIEW ? 0 : BKE_object_layer_visible(ob))) {
 			if ((ob->transflag & OB_DUPLI) && (ob->type!=OB_MBALL)) {
 				DupliObject *dob;
 				ListBase *duplilist;
@@ -5188,9 +5195,6 @@ static void database_init_objects(Render *re, unsigned int renderlay, int nolamp
 	for (group= re->main->group.first; group; group=group->id.next)
 		add_group_render_dupli_obs(re, group, nolamps, onlyselected, actob, timeoffset, 0);
 
-	printf("[DB] AFTER loop: objecttable.first=%p totinstance=%d\n",
-       (void*)re->objecttable.first, re->totinstance);
-	
 	if (!re->test_break(re->tbh))
 		RE_makeRenderInstances(re);
 }

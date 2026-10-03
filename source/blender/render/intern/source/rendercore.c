@@ -56,6 +56,8 @@
 #include "shading.h"
 #include "sss.h"
 #include "zbuf.h"
+#include "RE_Rasterizer.h"
+#include "RE_Prof.h"     /* ★ PROF */
 
 /* own include */
 #include "rendercore.h"
@@ -849,6 +851,7 @@ static void shadeDA_tile(RenderPart *pa, RenderLayer *rl)
 
 			if (*rd) {
 				if (shade_samples(&ssamp, (PixStr *)(*rd), x, y)) {
+					RE_prof_count(RE_PROF_C_SHADE_SMP, ssamp.tot);   /* ★ PROF */
 
 					/* multisample buffers or filtered mask filling? */
 					if (pa->fullresult.first) {
@@ -1203,8 +1206,11 @@ void zbufshadeDA_tile(RenderPart *pa)
 		}
 
 		/* shades solid */
-		if (rl->layflag & SCE_LAY_SOLID)
+		if (rl->layflag & SCE_LAY_SOLID) {
+			double t_sd0 = RE_prof_tick();   /* ★ PROF */
 			shadeDA_tile(pa, rl);
+			RE_prof_glob_span(RE_PROF_BI_SHADE, t_sd0);   /* ★ PROF */
+		}
 
 		/* lamphalo after solid, before ztra, looks nicest because ztra does own halo */
 		if (R.flag & R_LAMPHALO)
@@ -1329,6 +1335,18 @@ void zbufshade_tile(RenderPart *pa)
 	pa->rectp= MEM_mallocN(sizeof(int)*pa->rectx*pa->recty, "rectp");
 	pa->rectz= MEM_mallocN(sizeof(int)*pa->rectx*pa->recty, "rectz");
 
+	/* ★ ШАГ 3a/B3: G-буфер части — нужен своему шейдеру (и запасному проходу
+	 * атрибутов). Всё поле — NaN (0xFFFFFFFF), чтобы потребитель отличал
+	 * заполненный пиксель от незаполненного. */
+	if (RE_shader_enabled()) {
+		size_t gbuf_size= sizeof(float)*3*pa->rectx*pa->recty;
+
+		pa->gbuf_co= MEM_mallocN(gbuf_size, "gbuf_co");
+		pa->gbuf_vn= MEM_mallocN(gbuf_size, "gbuf_vn");
+		memset(pa->gbuf_co, 0xFF, gbuf_size);
+		memset(pa->gbuf_vn, 0xFF, gbuf_size);
+	}
+
 	for (rl= rr->layers.first; rl; rl= rl->next) {
 		float *rect= RE_RenderLayerGetPass(rl, RE_PASSNAME_COMBINED, R.viewname);
 		if ((rl->layflag & SCE_LAY_ZMASK) && (rl->layflag & SCE_LAY_NEG_ZMASK))
@@ -1338,6 +1356,21 @@ void zbufshade_tile(RenderPart *pa)
 		shade_sample_initialize(&ssamp, pa, rl);
 
 		zbuffer_solid(pa, rl, NULL, NULL);
+
+		/* ★ ШАГ 3a: G-буфер части из финальных rectp/recto/rectz — не зависит
+		 * от того, кто растеризовал часть (наш растеризатор или BI).
+		 * ★ ШАГ B2-ii перенёс эти вычисления в филлер. Запасной проход нужен,
+		 * когда часть растеризовал BI: проход читает rectp и потому работает
+		 * с любым растеризатором. */
+		const int attr_by_filler = RE_rasterizer_enabled(&R);
+
+		if (!attr_by_filler && pa->gbuf_co && pa->gbuf_vn) {
+			RE_RasterGBuffer gb;
+
+			gb.co= pa->gbuf_co;
+			gb.vn= pa->gbuf_vn;
+			RE_raster_gbuffer_fill(&R, pa, rl, &gb);
+		}
 
 		if (!R.test_break(R.tbh)) {	/* NOTE: this if () is not consistent */
 
@@ -1357,6 +1390,15 @@ void zbufshade_tile(RenderPart *pa)
 				const float *fcol = rect;
 				const int *ro= pa->recto, *rp= pa->rectp, *rz= pa->rectz;
 				int x, y, offs=0, seed;
+				/* ★ ШАГ B3: свой шейдер включён */
+				const int shader_on = RE_shader_enabled();
+				/* ★ ШАГ B3: покрытие своего шейдера на этой части/слое.
+				 * Без этих счётчиков «картинка совпала с BI» ничего не значит:
+				 * при отказе шейдера остаётся результат BI, и картинка
+				 * совпадёт при нулевом покрытии. */
+				int shader_acc = 0, shader_rej = 0;
+				/* ★ PROF — блок шейдинга solid целиком */
+				double t_shade0 = RE_prof_tick();
 
 				/* we set per pixel a fixed seed, for random AO and shadow samples */
 				seed= pa->rectx*pa->disprect.ymin;
@@ -1368,66 +1410,53 @@ void zbufshade_tile(RenderPart *pa)
 				if (R.occlusiontree)
 					cache_occ_samples(&R, pa, &ssamp);
 
-				/* ★ ДИАГНОСТИКА: сводка "кто выиграл" по плитке (раз на плитку) */
-				if (getenv("UBF_TILE_DUMP")) {
-					int c0 = 0, c1 = 0, cnone = 0, k;
-					for (k = 0; k < pa->rectx * pa->recty; k++) {
-						if (pa->rectp[k] == 0) cnone++;
-						else if (pa->recto[k] == 0) c0++;
-						else c1++;
-					}
-					printf("[TILE] xmin=%d ymin=%d px=%d: empty=%d obi0=%d obi1=%d\n",
-					       pa->disprect.xmin, pa->disprect.ymin,
-					       pa->rectx * pa->recty, cnone, c0, c1);
-				}
-
 				for (y=pa->disprect.ymin; y<pa->disprect.ymax; y++, rr->renrect.ymax++) {
 					for (x=pa->disprect.xmin; x<pa->disprect.xmax; x++, ro++, rz++, rp++, fcol+=4, offs++) {
 						/* per pixel fixed seed */
-						/* ★ ЭКСПЕРИМЕНТ: убираем зависимость RNG от номера потока */
-						BLI_thread_srandom(getenv("UBF_RNG0") ? 0 : pa->thread, seed++);
-
-						/* ★ НОВОЕ [SCAN]: заполняется ли zbuffer вообще */
-						{
-							static int scan_total = 0, scan_nonzero = 0, scan_done = 0;
-							if (!scan_done) {
-								if (scan_total < 20) {
-									printf("[SCAN] pixel (%d,%d): rp=%d ro=%d rz=%d\n",
-									       x, y, *rp, *ro, *rz);
-									scan_total++;
-									if (*rp != 0) scan_nonzero++;
-								}
-								else {
-									printf("[SCAN] SUMMARY: nonzero=%d of %d sampled\n",
-									       scan_nonzero, scan_total);
-									scan_done = 1;
-								}
-							}
-						}
+						BLI_thread_srandom(pa->thread, seed++);
 
 						if (*rp) {
 							ps.obi = *ro;
 							ps.facenr = *rp;
 							ps.z = *rz;
 
-							/* ★ ОТЛАДКА */
-							static int dbg_count = 0;
-							if (dbg_count < 5) {
-								printf("[SHADE] pixel (%d,%d): obi=%d facenr=%d z=%d\n",
-									x, y, ps.obi, ps.facenr, ps.z);
-								dbg_count++;
-							}
+							/* ★ ШАГ B3: свой шейдер идёт первым. Геометрия —
+							 * из G-буфера части, а не из shi->co/vn. Что свой
+							 * шейдер не умеет, он сам отдаёт BI (setup при этом
+							 * делается один раз), поэтому неподдержанные
+							 * пиксели считает ровно BI. При выключенном шейдере
+							 * путь BI не меняется вообще. */
+							if (shader_on && pa->gbuf_co && pa->gbuf_vn) {
+								const char *why = NULL;
+								double t_ours0 = RE_prof_tick();   /* ★ PROF */
 
-							if (shade_samples(&ssamp, &ps, x, y)) {
-								/* ★ ОТЛАДКА */
-								static int shade_ok = 0;
-								if (shade_ok < 5) {
-									printf("[SHADE] OK: combined=(%f,%f,%f,%f)\n",
-										ssamp.shr->combined[0], ssamp.shr->combined[1],
-										ssamp.shr->combined[2], ssamp.shr->combined[3]);
-									shade_ok++;
+								if (RE_shader_shade_samples(&R, &ssamp, &ps, x, y,
+								                            pa->gbuf_co + 3 * offs,
+								                            pa->gbuf_vn + 3 * offs,
+								                            &why))
+								{
+									if (why) {
+										shader_rej++;
+										if (pa->nr == 1 && shader_rej <= 4)
+											printf("[SHADER] fallback: %s\n", why);
+									}
+									else {
+										shader_acc++;
+									}
+
+									add_passes(rl, offs, ssamp.shi, ssamp.shr);
 								}
-								add_passes(rl, offs, ssamp.shi, ssamp.shr);
+
+								RE_prof_glob_span(RE_PROF_SHADE_OURS, t_ours0);   /* ★ PROF */
+							}
+							else {
+								double t_bi0 = RE_prof_tick();   /* ★ PROF */
+								int shaded = shade_samples(&ssamp, &ps, x, y);
+
+								RE_prof_glob_span(RE_PROF_SHADE_BI, t_bi0);      /* ★ PROF */
+
+								if (shaded)
+									add_passes(rl, offs, ssamp.shi, ssamp.shr);
 							}
 						}
 					}
@@ -1435,11 +1464,20 @@ void zbufshade_tile(RenderPart *pa)
 						if (R.test_break(R.tbh)) break;
 				}
 
+				/* ★ ШАГ B3: покрытие своего шейдера за эту часть/слой */
+				if (shader_on && (shader_acc || shader_rej)) {
+					printf("[SHADER] part %d: own=%d rejected=%d (%.1f%% own)\n",
+					       pa->nr, shader_acc, shader_rej,
+					       100.0 * (double)shader_acc / (double)(shader_acc + shader_rej));
+				}
+
 				if (R.occlusiontree)
 					free_occ_samples(&R, pa);
 
 				if (R.r.mode & R_SHADOW)
 					ISB_free(pa);
+
+				RE_prof_glob_span(RE_PROF_SHADE, t_shade0);   /* ★ PROF */
 			}
 
 			/* disable scanline updating */
@@ -1509,6 +1547,10 @@ void zbufshade_tile(RenderPart *pa)
 	MEM_freeN(pa->recto); pa->recto= NULL;
 	MEM_freeN(pa->rectp); pa->rectp= NULL;
 	MEM_freeN(pa->rectz); pa->rectz= NULL;
+
+	/* ★ ШАГ 3a: G-буфер части */
+	if (pa->gbuf_co) { MEM_freeN(pa->gbuf_co); pa->gbuf_co= NULL; }
+	if (pa->gbuf_vn) { MEM_freeN(pa->gbuf_vn); pa->gbuf_vn= NULL; }
 }
 
 /* SSS preprocess tile render, fully threadable */

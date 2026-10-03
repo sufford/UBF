@@ -88,6 +88,11 @@ set(SRC
 	intern/source/RE_Rasterizer.c
 	intern/source/RE_RasterScene.c
 	intern/source/RE_StorageScanline.c
+	intern/source/RE_Shader.c
+	intern/source/RE_Clipper.c
+	intern/source/RE_Filler.c
+	intern/source/RE_Mirror.c
+	intern/source/RE_Prof.c
 
 	extern/include/RE_bake.h
 	extern/include/RE_engine.h

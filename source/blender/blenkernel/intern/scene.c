@@ -627,6 +627,11 @@ void BKE_scene_init(Scene *sce)
 
 	sce->r.threads = 1;
 
+	/* custom fork: у новых сцен растеризатор включён, как было до появления
+	 * настройки (хардкод в RE_InitState убран). Старые .blend хранят 0 (Off) —
+	 * режим переключается в Render → Rasterizer. */
+	sce->r.rasterizer_mode = RE_RASTERIZER_SCANLINE;
+
 	sce->r.simplify_subsurf = 6;
 	sce->r.simplify_particles = 1.0f;
 	sce->r.simplify_shadowsamples = 16;
@@ -987,11 +992,15 @@ bool BKE_object_layer_visible(const Object *ob)
         return false;
     }
 
-    /* ★ ВРЕМЕННЫЙ ФИКС: если объект ещё не привязан ни к одному
-     * SceneLayer (layer_links пуст), считаем его видимым, чтобы рендер
-     * не блокировался. Правильная привязка будет добавлена позже. */
+    /* Объекты без layer_links — классические: к dynamic-слоям они не
+     * привязаны, их 20-битная маска лежит в ob->lay, и видимость решают
+     * вызывающие через (obi->lay & lay). Возвращать здесь true нельзя —
+     * тогда объект с исключённого классического слоя протекает в рендер
+     * (проверено: f12_excl, CubeB при true даёт obi_count 2 -> 3, 5928
+     * различающихся пикселей). Так же вёл себя и сток 2.79: до 4c5d632
+     * предиката в условии включения не было вообще. */
     if (BLI_listbase_is_empty(&ob->layer_links)) {
-        return true;
+        return false;
     }
 
     for (link = ob->layer_links.first; link; link = link->next) {

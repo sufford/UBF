@@ -1450,11 +1450,11 @@ void shade_samples_fill_with_ps(ShadeSample *ssamp, PixStr *ps, int x, int y)
 	}
 }
 
-/* shades samples, returns true if anything happened */
-int shade_samples(ShadeSample *ssamp, PixStr *ps, int x, int y)
+/* ★ ШАГ B3: вторая половина shade_samples() — шейдинг без setup-а.
+ * Вынесено отдельно, чтобы свой шейдер мог отдать пиксель BI, уже сделав
+ * shade_samples_fill_with_ps(), и не прогонять setup дважды. */
+int shade_samples_shade(ShadeSample *ssamp)
 {
-	shade_samples_fill_with_ps(ssamp, ps, x, y);
-
 	if (ssamp->tot) {
 		ShadeInput *shi = ssamp->shi;
 		ShadeResult *shr = ssamp->shr;
@@ -1479,4 +1479,12 @@ int shade_samples(ShadeSample *ssamp, PixStr *ps, int x, int y)
 		return 1;
 	}
 	return 0;
+}
+
+/* shades samples, returns true if anything happened */
+int shade_samples(ShadeSample *ssamp, PixStr *ps, int x, int y)
+{
+	shade_samples_fill_with_ps(ssamp, ps, x, y);
+
+	return shade_samples_shade(ssamp);
 }

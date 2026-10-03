@@ -283,17 +283,18 @@ void ED_view3d_stop_render_preview(wmWindowManager *wm, ARegion *ar)
 	}
 }
 
-void ED_view3d_shade_update(Main *bmain, View3D *v3d, ScrArea *sa)
+void ED_view3d_shade_update(Main *bmain, View3D *UNUSED(v3d), ScrArea *sa)
 {
 	wmWindowManager *wm = bmain->wm.first;
+	ARegion *ar;
 
-	if (v3d->drawtype != OB_RENDER) {
-		ARegion *ar;
-
-		for (ar = sa->regionbase.first; ar; ar = ar->next) {
-			if (ar->regiondata)
-				ED_view3d_stop_render_preview(wm, ar);
-		}
+	/* Режим вьюпорта — часть состояния превью: OB_RASTER включает программный
+	 * растеризатор (render_internal.c). Поэтому превью пересоздаётся на любом
+	 * изменении режима, включая переход Rendered <-> Rasterizer — иначе старое
+	 * превью продолжало бы считаться прежним растеризатором. */
+	for (ar = sa->regionbase.first; ar; ar = ar->next) {
+		if (ar->regiondata)
+			ED_view3d_stop_render_preview(wm, ar);
 	}
 }
 
@@ -443,7 +444,7 @@ static SpaceLink *view3d_duplicate(SpaceLink *sl)
 		v3dn->lay = v3do->localvd->lay & 0xFFFFFF;
 	}
 
-	if (v3dn->drawtype == OB_RENDER)
+	if (OB_DRAWTYPE_IS_RENDER(v3dn->drawtype))
 		v3dn->drawtype = OB_SOLID;
 
 	/* copy or clear inside new stuff */

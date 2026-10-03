@@ -273,6 +273,11 @@ class RENDER_PT_performance(RenderButtonsPanel, Panel):
         col.prop(rd, "tile_x", text="X")
         col.prop(rd, "tile_y", text="Y")
 
+        # custom fork: выбор растеризатора (software scanline или встроенный BI)
+        col.separator()
+        col.label(text="Rasterizer:")
+        col.prop(rd, "rasterizer_mode", text="")
+
         col.separator()
         col.prop(rd, "preview_start_resolution")
         col.prop(rd, "preview_pixel_size", text="")

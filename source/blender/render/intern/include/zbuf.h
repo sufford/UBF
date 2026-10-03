@@ -33,9 +33,6 @@ struct ZSpan;
 
 void fillrect(int *rect, int x, int y, int val);
 
-/* ★ ОТЛАДКА: дамп tie-случаев (равная глубина) в zbuffillGL4 */
-void zbuf_debug_set_tiedump(int on);
-
 /**
  * Converts a world coordinate into a homogeneous coordinate in view
  * coordinates.

@@ -173,7 +173,7 @@ typedef struct View3D {
 
 	/**
 	 * The drawing mode for the 3d display. Set to OB_BOUNDBOX, OB_WIRE, OB_SOLID,
-	 * OB_TEXTURE, OB_MATERIAL or OB_RENDER */
+	 * OB_TEXTURE, OB_MATERIAL, OB_RENDER or OB_RASTER */
 	char drawtype;
 	char ob_centre_cursor;		/* optional bool for 3d cursor to define center */
 	short scenelock, around;

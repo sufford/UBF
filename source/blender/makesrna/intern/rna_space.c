@@ -189,6 +189,21 @@ const EnumPropertyItem rna_enum_viewport_shade_items[] = {
 	{0, NULL, 0, NULL, NULL}
 };
 
+/* custom fork: список режимов для 3D-вьюпорта. Отличается от общего
+ * rna_enum_viewport_shade_items только режимом RASTERIZER — он есть только у
+ * SpaceView3D (общий список используется секвенсором: sequencer_gl_preview). */
+static const EnumPropertyItem rna_enum_viewport_shade_3d_items[] = {
+	{OB_BOUNDBOX, "BOUNDBOX", ICON_BBOX, "Bounding Box", "Display the object's local bounding boxes only"},
+	{OB_WIRE, "WIREFRAME", ICON_WIRE, "Wireframe", "Display the object as wire edges"},
+	{OB_SOLID, "SOLID", ICON_SOLID, "Solid", "Display the object solid, lit with default OpenGL lights"},
+	{OB_TEXTURE, "TEXTURED", ICON_POTATO, "Texture", "Display the object solid, with a texture"},
+	{OB_MATERIAL, "MATERIAL", ICON_MATERIAL_DATA, "Material", "Display objects solid, with GLSL material"},
+	{OB_RENDER, "RENDERED", ICON_SMOOTH, "Rendered", "Display render preview"},
+	{OB_RASTER, "RASTERIZER", ICON_RENDER_STILL, "Rasterizer",
+	 "Display the view rendered by the software rasterizer"},
+	{0, NULL, 0, NULL, NULL}
+};
+
 
 const EnumPropertyItem rna_enum_clip_editor_mode_items[] = {
 	{SC_MODE_TRACKING, "TRACKING", ICON_ANIM_DATA, "Tracking", "Show tracking and solving tools"},
@@ -707,7 +722,7 @@ static int rna_SpaceView3D_viewport_shade_get(PointerRNA *ptr)
 	View3D *v3d = (View3D *)ptr->data;
 	int drawtype = v3d->drawtype;
 
-	if (drawtype == OB_RENDER && !(type && type->view_draw))
+	if (OB_DRAWTYPE_IS_RENDER(drawtype) && !(type && type->view_draw))
 		return OB_SOLID;
 
 	return drawtype;
@@ -716,7 +731,9 @@ static int rna_SpaceView3D_viewport_shade_get(PointerRNA *ptr)
 static void rna_SpaceView3D_viewport_shade_set(PointerRNA *ptr, int value)
 {
 	View3D *v3d = (View3D *)ptr->data;
-	if (value != v3d->drawtype && value == OB_RENDER) {
+	/* prev_drawtype — это режим, в который вернуться из "движкового".
+	 * Переключение Rendered <-> Rasterizer его не портит. */
+	if (value != v3d->drawtype && OB_DRAWTYPE_IS_RENDER(value) && !OB_DRAWTYPE_IS_RENDER(v3d->drawtype)) {
 		v3d->prev_drawtype = v3d->drawtype;
 	}
 	v3d->drawtype = value;
@@ -731,14 +748,16 @@ static const EnumPropertyItem *rna_SpaceView3D_viewport_shade_itemf(bContext *UN
 	EnumPropertyItem *item = NULL;
 	int totitem = 0;
 
-	RNA_enum_items_add_value(&item, &totitem, rna_enum_viewport_shade_items, OB_BOUNDBOX);
-	RNA_enum_items_add_value(&item, &totitem, rna_enum_viewport_shade_items, OB_WIRE);
-	RNA_enum_items_add_value(&item, &totitem, rna_enum_viewport_shade_items, OB_SOLID);
-	RNA_enum_items_add_value(&item, &totitem, rna_enum_viewport_shade_items, OB_TEXTURE);
-	RNA_enum_items_add_value(&item, &totitem, rna_enum_viewport_shade_items, OB_MATERIAL);
+	RNA_enum_items_add_value(&item, &totitem, rna_enum_viewport_shade_3d_items, OB_BOUNDBOX);
+	RNA_enum_items_add_value(&item, &totitem, rna_enum_viewport_shade_3d_items, OB_WIRE);
+	RNA_enum_items_add_value(&item, &totitem, rna_enum_viewport_shade_3d_items, OB_SOLID);
+	RNA_enum_items_add_value(&item, &totitem, rna_enum_viewport_shade_3d_items, OB_TEXTURE);
+	RNA_enum_items_add_value(&item, &totitem, rna_enum_viewport_shade_3d_items, OB_MATERIAL);
 
-	if (type && type->view_draw)
-		RNA_enum_items_add_value(&item, &totitem, rna_enum_viewport_shade_items, OB_RENDER);
+	if (type && type->view_draw) {
+		RNA_enum_items_add_value(&item, &totitem, rna_enum_viewport_shade_3d_items, OB_RENDER);
+		RNA_enum_items_add_value(&item, &totitem, rna_enum_viewport_shade_3d_items, OB_RASTER);
+	}
 
 	RNA_enum_item_end(&item, &totitem);
 	*r_free = true;
@@ -2472,7 +2491,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
 
 	prop = RNA_def_property(srna, "viewport_shade", PROP_ENUM, PROP_NONE);
 	RNA_def_property_enum_sdna(prop, NULL, "drawtype");
-	RNA_def_property_enum_items(prop, rna_enum_viewport_shade_items);
+	RNA_def_property_enum_items(prop, rna_enum_viewport_shade_3d_items);
 	RNA_def_property_enum_funcs(prop, "rna_SpaceView3D_viewport_shade_get", "rna_SpaceView3D_viewport_shade_set",
 	                            "rna_SpaceView3D_viewport_shade_itemf");
 	RNA_def_property_ui_text(prop, "Viewport Shading", "Method to display/shade objects in the 3D View");

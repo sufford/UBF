@@ -3654,7 +3654,7 @@ bool ED_view3d_calc_render_border(
 	bool use_border;
 
 	/* test if there is a 3d view rendering */
-	if (v3d->drawtype != OB_RENDER || !view3d_main_region_do_render_draw(scene))
+	if (!OB_DRAWTYPE_IS_RENDER(v3d->drawtype) || !view3d_main_region_do_render_draw(scene))
 		return false;
 
 	/* test if there is a border render */
@@ -4120,7 +4120,7 @@ void view3d_main_region_draw(const bContext *C, ARegion *ar)
 	clip_border = (render_border && !BLI_rcti_compare(&ar->drawrct, &border_rect));
 
 	/* draw viewport using opengl */
-	if (v3d->drawtype != OB_RENDER || !view3d_main_region_do_render_draw(scene) || clip_border) {
+	if (!OB_DRAWTYPE_IS_RENDER(v3d->drawtype) || !view3d_main_region_do_render_draw(scene) || clip_border) {
 		view3d_main_region_draw_objects(C, scene, v3d, ar, &grid_unit);
 
 #ifdef DEBUG_DRAW
@@ -4133,7 +4133,7 @@ void view3d_main_region_draw(const bContext *C, ARegion *ar)
 	}
 
 	/* draw viewport using external renderer */
-	if (v3d->drawtype == OB_RENDER)
+	if (OB_DRAWTYPE_IS_RENDER(v3d->drawtype))
 		view3d_main_region_draw_engine(C, scene, ar, v3d, clip_border, &border_rect);
 
 	view3d_main_region_draw_info(C, scene, ar, v3d, grid_unit, render_border);

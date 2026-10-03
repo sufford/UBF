@@ -97,6 +97,7 @@
 #include "pixelblending.h"
 #include "zbuf.h"
 #include "RE_Rasterizer.h"
+#include "RE_Prof.h"   /* ★ PROF */
 
 /* render flow
  *
@@ -578,8 +579,14 @@ void RE_FreeRender(Render *re)
 	
 	/* software rasterizer (custom fork) — до RE_Database_Free() */
 	if (re->rasterizer) {
-		RE_rasterizer_free(re->rasterizer);
+		RE_rasterizer_free(re->rasterizer);   /* внутри печатает RE_prof_report() */
 		re->rasterizer = NULL;
+	}
+	else {
+		/* ★ PROF: путь BI (rasterizer_mode=OFF). Растеризатора нет, значит
+		 * RE_rasterizer_free() не позовётся — печатаем отчёт сами, иначе
+		 * замеры пути BI потеряются. */
+		RE_prof_report();
 	}
 
 	BLI_rw_mutex_end(&re->resultmutex);
@@ -866,23 +873,9 @@ void RE_InitState(Render *re, Render *source, RenderData *rd,
 
 	re->mblur_offs = re->field_offs = 0.f;
 
-	/* ★ ОТЛАДКА: хеш матриц вида на момент инициализации состояния */
-	if (getenv("UBF_MDUMP")) {
-		unsigned int hv = 2166136261u, hw = 2166136261u;
-		const unsigned char *pv = (const unsigned char *)re->viewmat;
-		const unsigned char *pw = (const unsigned char *)re->winmat;
-		int k;
-		for (k = 0; k < 64; k++) {
-			hv = (hv ^ pv[k]) * 16777619u;
-			hw = (hw ^ pw[k]) * 16777619u;
-		}
-		printf("[MDUMP] InitState viewmat=%08x winmat=%08x viewmat00=%.9g winmat00=%.9g\n",
-		       hv, hw, (double)((const float *)re->viewmat)[0],
-		       (double)((const float *)re->winmat)[0]);
-	}
-	
-		/* software rasterizer (custom fork) — TODO: ВРЕМЕННЫЙ ХАРДКОД */
-	re->r.rasterizer_mode = RE_RASTERIZER_SCANLINE;
+	/* software rasterizer (custom fork): режим приходит из настроек рендера
+	 * (scene.render.rasterizer_mode). Раньше здесь стоял хардкод
+	 * RE_RASTERIZER_SCANLINE, из-за которого режим нельзя было выбрать. */
 	if (re->r.rasterizer_mode != RE_RASTERIZER_OFF) {
 		RE_RasterStorageType type = RE_STORAGE_SCANLINE;
 
@@ -891,13 +884,15 @@ void RE_InitState(Render *re, Render *source, RenderData *rd,
 		else if (re->r.rasterizer_mode == RE_RASTERIZER_TILED)
 			type = RE_STORAGE_TILED;
 
-		re->rasterizer = RE_rasterizer_create(re, type);
+		/* ★ Освобождаем предыдущий растеризатор, если он был — иначе утечка.
+		 * Пересоздаём каждый RE_InitState, чтобы scene строилась из свежей
+		 * объектной базы (preview vs main и т.п.). */
 		if (re->rasterizer) {
-			/* scene будет построена в do_render_3d после RE_Database_FromScene */
-			printf("[RASTERIZER] created, mode=%d\n", re->r.rasterizer_mode);
-		} else {
-			printf("[RASTERIZER] create FAILED\n");
+			RE_rasterizer_free(re->rasterizer);
+			re->rasterizer = NULL;
 		}
+
+		re->rasterizer = RE_rasterizer_create(re, type);
 	}
 
 	RE_init_threadcount(re);
@@ -1429,8 +1424,6 @@ static void rasterizer_prepare(Render *re)
 {
 	if (re->rasterizer && !re->rasterizer->scene) {
 		re->rasterizer->scene = RE_raster_scene_build(re->rasterizer);
-		printf("[RASTERIZER] scene built: buckets=%d\n",
-		       re->rasterizer->scene ? re->rasterizer->scene->num_buckets : 0);
 	}
 	if (re->rasterizer && re->rasterizer->scene) {
 		RenderLayer *rl_vis = render_get_active_layer(re, re->result);
@@ -1451,6 +1444,66 @@ static void threaded_tile_processor(Render *re)
 
 	if (re->result == NULL)
 		return;
+
+	/* ★ Плиточная сетка для внутреннего рендерера больше не используется.
+	 * RE_parts_clamp() берёт размер части из r.tilex/tiley, поэтому здесь
+	 * задаётся разбиение: во всю ширину кадра, а по высоте — на полосы по числу
+	 * потоков. Это даёт параллельность тула (части разбирает пул потоков), но
+	 * картинка проявляется полосами на всю ширину, а не мозаикой плиток.
+	 * Мозаика была нужна не рендереру, а маленьким буферам zbuf; при полосе во
+	 * всю ширину ассерт в panotestclip() (renderdatabase.c)
+	 * "partx == min_ii(r.tilex, rectx)" остаётся валидным.
+	 * r — копия RenderData внутри Render, сцены это не касается.
+	 * Панорама исключена: ей нужны вертикальные слайсы, а
+	 * find_next_pano_slice() выбирает части по disprect.xmin.
+	 * OSA раньше тоже был исключён (считался одним куском), из-за чего рендер
+	 * становился однопоточным. Теперь при OSA берётся квадратная сетка BI —
+	 * см. комментарий в блоке ниже. */
+	if ((re->r.mode & R_PANORAMA) == 0) {
+		const int minrows = 8;  /* ниже этого дробить смысла нет */
+		int threads = re->r.threads;
+		int tiley = re->recty;
+		int tilex = re->rectx;
+
+		if (threads < 1)
+			threads = 1;
+
+		if (re->osa == 0) {
+			/* Без OSA — полосы во всю ширину по числу потоков (как было).
+			 * AA тут нет, поэтому форма части на результат не влияет. */
+			if (threads > 1 && re->recty / threads >= minrows)
+				tiley = re->recty / threads;
+		}
+		else {
+			/* ★ OSA: раньше кадр считался ОДНОЙ частью (tiley = recty),
+			 * потому что результат AA в BI зависит от формы части. Это
+			 * делало ВЕСЬ рендер однопоточным: пул потоков получал одно
+			 * задание, и 16 ядер простаивали. На 1600x768 (OSA 8) это
+			 * 25 минут вместо минут.
+			 *
+			 * Форму части ломает именно НАША правка — полоса во всю ширину.
+			 * Размер квадратной плитки AA как раз не ломает: в форке
+			 * замерено, что на 256x256 при OSA=16 кадр целиком и плитки
+			 * 64x64 дают одно и то же, а полоса 256x16 — 860 различающихся
+			 * пикселей (max=254). Поэтому для OSA возвращаем штатную сетку
+			 * BI — квадратные плитки R.tilex x R.tiley (по умолчанию
+			 * 256x256), и параллельность возвращается вместе с ней.
+			 *
+			 * UBF_TILE задаёт размер квадратной плитки. Нужен для замера
+			 * инвариантности AA к разбиению (разные значения обязаны давать
+			 * побитово один кадр); по умолчанию — как в BI. */
+			const char *e = getenv("UBF_TILE");
+			int t = e ? atoi(e) : 256;
+
+			if (t < 16)
+				t = 16;
+			tilex = t;
+			tiley = t;
+		}
+
+		re->r.tilex = tilex;
+		re->r.tiley = tiley;
+	}
 
 	/* warning; no return here without closing exr file */
 	RE_parts_init(re, true);
@@ -1577,6 +1630,7 @@ static void threaded_tile_processor(Render *re)
 	BLI_rw_mutex_lock(&re->partsmutex, THREAD_LOCK_WRITE);
 	RE_parts_free(re);
 	BLI_rw_mutex_unlock(&re->partsmutex);
+
 	re->viewplane = viewplane; /* restore viewplane, modified by pano render */
 }
 
@@ -4059,12 +4113,6 @@ bool RE_ReadRenderResult(Scene *scene, Scene *scenode)
 void RE_init_threadcount(Render *re)
 {
 	re->r.threads = BKE_render_num_threads(&re->r);
-	
-	// FORCE 8 THREADS FOR TESTING
-	if (re->r.threads < 8) {
-		printf("Forcing 8 threads (was %d)\n", re->r.threads);
-		re->r.threads = 8;
-	}
 }
 
 /* loads in image into a result, size must match

@@ -66,6 +66,7 @@
 /* own includes */
 #include "zbuf.h"
 #include "RE_Rasterizer.h"
+#include "RE_Prof.h"   /* ★ PROF */
 
 /* could enable at some point but for now there are far too many conversions */
 #ifdef __GNUC__
@@ -77,14 +78,6 @@
 /* only to be used here in this file, it's for speed */
 extern struct Render R;
 /* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-
-/* ★ ОТЛАДКА: дамп tie-случаев в zbuffillGL4 (равная глубина у двух примитивов) */
-static int g_tiedump = 0;
-
-void zbuf_debug_set_tiedump(int on)
-{
-	g_tiedump = on;
-}
 
 
 /* ****************** Spans ******************************* */
@@ -1185,24 +1178,6 @@ void zbuffillGL4(ZSpan *zspan, int obi, int zvlnr,
 	const int *rectmaskofs, *rm;
 	int *rz, x, y;
 	int sn1, sn2, rectx, *rectzofs, my0, my2;
-	/* ★ ОТЛАДКА: не указывает ли вход в выходной буфер плитки (перекрытие) */
-	if (getenv("UBF_STACK")) {
-		intptr_t lo = (intptr_t)zspan->rectz, hi = lo + (intptr_t)zspan->rectx * zspan->recty * 4;
-		printf("[INPUT] zvlnr=%d v1=%p v2=%p v3=%p rectp=%p rectz=%p inbuf=%d\n",
-		       zvlnr, (const void *)v1, (const void *)v2, (const void *)v3,
-		       (void *)zspan->rectp, (void *)zspan->rectz,
-		       (((intptr_t)v1 >= lo && (intptr_t)v1 < hi) ||
-		        ((intptr_t)v2 >= lo && (intptr_t)v2 < hi) ||
-		        ((intptr_t)v3 >= lo && (intptr_t)v3 < hi)) ? 1 : 0);
-	}
-	/* ★ ОТЛАДКА: побитовый дамп входа zbuffillGL4 */
-	if (getenv("UBF_FDUMP2")) {
-		printf("[FDUMP2] zvlnr=%d v4=%d v1=(%08x,%08x,%08x) v2=(%08x,%08x,%08x) v3=(%08x,%08x,%08x)\n",
-		       zvlnr, v4 ? 1 : 0,
-		       *(const unsigned int *)&v1[0], *(const unsigned int *)&v1[1], *(const unsigned int *)&v1[2],
-		       *(const unsigned int *)&v2[0], *(const unsigned int *)&v2[1], *(const unsigned int *)&v2[2],
-		       *(const unsigned int *)&v3[0], *(const unsigned int *)&v3[1], *(const unsigned int *)&v3[2]);
-	}
 
 	/* init */
 	zbuf_init_span(zspan);
@@ -1285,14 +1260,6 @@ void zbuffillGL4(ZSpan *zspan, int obi, int zvlnr,
 
 			while (x>=0) {
 				intzverg = round_db_to_int_clamp(zverg);
-
-				/* ★ ОТЛАДКА: фиксируем tie-случаи (равная глубина).
-				 * При строгом '<' tie не перезаписывает пиксель, значит
-				 * результат не должен зависеть от порядка отрисовки. */
-				if (g_tiedump && intzverg == *rz && *rp != 0 && *rp != zvlnr) {
-					printf("[TIE] zvlnr=%d prev=%d z=%d x=%d y=%d\n",
-					       zvlnr, *rp, intzverg, sn1 + (sn2 - sn1 - x), y);
-				}
 
 				if (intzverg < *rz) { /* ONLY UNIQUE LINE: see comment above */
 					if (!zspan->rectmask || intzverg > *rm) {
@@ -2087,14 +2054,31 @@ static void zmask_rect(int *rectz, int *rectp, int xs, int ys, int neg)
 
 void zbuffer_solid(RenderPart *pa, RenderLayer *rl, void(*fillfunc)(RenderPart *, ZSpan *, int, void *), void *data)
 {
+	double t_bs0 = 0.0;   /* ★ PROF: только ветка BI (ниже раннего return) */
 	if (RE_rasterizer_enabled(&R) && R.rasterizer) {
-		printf("[RASTERIZER] zbuffer_solid -> rasterizer (part %d, %dx%d)\n",
-		       pa->nr, pa->rectx, pa->recty);
-		RE_rasterizer_render_part(R.rasterizer, pa, rl);
-		if (fillfunc)
-			fillfunc(pa, NULL, pa->sample, data);
+		ZSpan zspans[16];
+		int nsamples = 0;
+		int i;
+
+		RE_rasterizer_render_part(R.rasterizer, pa, rl, zspans, &nsamples);
+
+		if (fillfunc) {
+			for (i = 0; i < nsamples; i++)
+				fillfunc(pa, &zspans[i], pa->sample + i, data);
+		}
+
+		/* ★ освобождаем scratch-буферы промежуточных сэмплов.
+		 * Последний сэмпл указывает на pa->rect* — их не трогаем. */
+		for (i = 0; i < nsamples; i++) {
+			if (!(nsamples == 1 || i == nsamples - 1)) {
+				if (zspans[i].rectz) MEM_freeN(zspans[i].rectz);
+				if (zspans[i].rectp) MEM_freeN(zspans[i].rectp);
+				if (zspans[i].recto) MEM_freeN(zspans[i].recto);
+			}
+		}
 		return;
 	}
+	t_bs0 = RE_prof_tick();   /* ★ PROF */
 	
 	ZbufProjectCache cache[ZBUF_PROJECT_CACHE_SIZE];
 	ZSpan zspans[16], *zspan; /* 16 = RE_MAX_OSA */
@@ -2327,6 +2311,8 @@ void zbuffer_solid(RenderPart *pa, RenderLayer *rl, void(*fillfunc)(RenderPart *
 
 		zbuf_free_span(zspan);
 	}
+
+	RE_prof_glob_span(RE_PROF_BI_RASTER, t_bs0);   /* ★ PROF */
 }
 
 void zbuffer_shadow(Render *re, float winmat[4][4], LampRen *lar, int *rectz, int size, float jitx, float jity)

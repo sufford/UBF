@@ -54,6 +54,7 @@
 #include "rayintersection.h"
 #include "rayobject.h"
 #include "raycounter.h"
+#include "RE_Prof.h"   /* ★ PROF */
 
 #define RAY_TRA		1
 #define RAY_INSIDE	2
@@ -397,6 +398,7 @@ void makeraytree(Render *re)
 {
 	float min[3], max[3], sub[3];
 	int i;
+	double t_rt0 = RE_prof_tick();   /* ★ PROF */
 
 	re->i.infostr = IFACE_("Raytree.. preparing");
 	re->stats_draw(re->sdh, &re->i);
@@ -439,6 +441,7 @@ void makeraytree(Render *re)
 #ifdef RE_RAYCOUNTER
 	memset(re_rc_counter, 0, sizeof(re_rc_counter));
 #endif
+	RE_prof_glob_span(RE_PROF_RAYTREE, t_rt0);   /* ★ PROF */
 }
 
 /* 	if (shi->osatex)  */
@@ -714,6 +717,7 @@ static void traceray(ShadeInput *origshi, ShadeResult *origshr, short depth, con
 	/* database is in original view, obi->imat transforms current position back to original */
 	RE_instance_rotate_ray(origshi->obi, &isec);
 
+	RE_prof_count(RE_PROF_C_RAYCAST, 1);   /* ★ PROF */
 	if (RE_rayobject_raycast(R.raytree, &isec)) {
 		ShadeResult shr= {{0}};
 		float d= 1.0f;
@@ -1284,6 +1288,8 @@ static float get_avg_speed(ShadeInput *shi)
 
 static void trace_refract(float col[4], ShadeInput *shi, ShadeResult *shr)
 {
+	double t_rf0 = RE_prof_tick();   /* ★ PROF */
+	RE_prof_count(RE_PROF_C_REFRACT, 1);   /* ★ PROF */
 	QMCSampler *qsa=NULL;
 	int samp_type;
 	int traflag=0;
@@ -1382,10 +1388,14 @@ static void trace_refract(float col[4], ShadeInput *shi, ShadeResult *shr)
 
 	if (qsa)
 		release_thread_qmcsampler(&R, shi->thread, qsa);
+
+	RE_prof_glob_span(RE_PROF_REFRACT, t_rf0);   /* ★ PROF */
 }
 
 static void trace_reflect(float col[3], ShadeInput *shi, ShadeResult *shr, float fresnelfac)
 {
+	double t_rl0 = RE_prof_tick();   /* ★ PROF */
+	RE_prof_count(RE_PROF_C_REFLECT, 1);   /* ★ PROF */
 	QMCSampler *qsa=NULL;
 	int samp_type;
 
@@ -1492,6 +1502,8 @@ static void trace_reflect(float col[3], ShadeInput *shi, ShadeResult *shr, float
 
 	if (qsa)
 		release_thread_qmcsampler(&R, shi->thread, qsa);
+
+	RE_prof_glob_span(RE_PROF_REFLECT, t_rl0);   /* ★ PROF */
 }
 
 /* extern call from render loop */
@@ -1501,6 +1513,9 @@ void ray_trace(ShadeInput *shi, ShadeResult *shr)
 	float mircol[4], tracol[4];
 	float diff[3];
 	int do_tra, do_mir;
+	double t_ray0 = RE_prof_tick();   /* ★ PROF */
+
+	RE_prof_count(RE_PROF_C_RAYTRACE, 1);   /* ★ PROF */
 
 	do_tra = ((shi->mode & MA_TRANSP) && (shi->mode & MA_RAYTRANSP) && shr->alpha != 1.0f && (shi->depth <= shi->mat->ray_depth_tra));
 	do_mir = ((shi->mat->mode & MA_RAYMIRROR) && shi->ray_mirror != 0.0f && (shi->depth <= shi->mat->ray_depth));
@@ -1577,6 +1592,8 @@ void ray_trace(ShadeInput *shi, ShadeResult *shr)
 		add_v3_v3v3(shr->combined, diff, shr->spec);
 	else
 		copy_v3_v3(shr->combined, diff);
+
+	RE_prof_glob_span(RE_PROF_RAYTRACE, t_ray0);   /* ★ PROF */
 }
 
 /* color 'shadfac' passes through 'col' with alpha and filter */

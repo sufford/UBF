@@ -1257,6 +1257,13 @@ static void render_view3d_startjob(void *customdata, short *stop, short *do_upda
 
 		/* no osa, blur, seq, layers, savebuffer etc for preview render */
 		rdata = rp->scene->r;
+
+		/* custom fork: режим вьюпорта "Rasterizer" (OB_RASTER) считает превью
+		 * программным растеризатором форка. Настройку сцены не трогаем — это
+		 * свойство именно этого вьюпорта. */
+		if (rp->v3d && rp->v3d->drawtype == OB_RASTER)
+			rdata.rasterizer_mode = RE_RASTERIZER_SCANLINE;
+
 		rdata.mode &= ~(R_OSA | R_MBLUR | R_BORDER | R_PANORAMA);
 		rdata.scemode &= ~(R_DOSEQ | R_DOCOMP | R_FREE_IMAGE | R_EXR_TILE_FILE | R_FULL_SAMPLE);
 		rdata.scemode |= R_VIEWPORT_PREVIEW;

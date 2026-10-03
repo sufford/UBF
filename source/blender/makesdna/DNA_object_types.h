@@ -450,9 +450,15 @@ enum {
 	OB_MATERIAL  = 4,
 	OB_TEXTURE   = 5,
 	OB_RENDER    = 6,
+	OB_RASTER    = 7,    /* custom fork: viewport "Rasterizer" (software rasterizer) */
 
 	OB_PAINT     = 100,  /* temporary used in draw code */
 };
+
+/* custom fork: режимы вьюпорта, которые рисуются движком рендера (превью),
+ * а не OpenGL'ом. OB_RASTER — то же самое, но превью считает программный
+ * растеризатор форка (см. render_internal.c, render_view3d_engine). */
+#define OB_DRAWTYPE_IS_RENDER(dt)  ((dt) == OB_RENDER || (dt) == OB_RASTER)
 
 /* dtx: flags (short) */
 enum {

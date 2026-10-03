@@ -180,7 +180,7 @@ void ED_view3d_smooth_view_ex(
 	}
 
 	/* skip smooth viewing for render engine draw */
-	if (smooth_viewtx && v3d->drawtype != OB_RENDER) {
+	if (smooth_viewtx && !OB_DRAWTYPE_IS_RENDER(v3d->drawtype)) {
 		bool changed = false; /* zero means no difference */
 
 		if (sview->camera_old != sview->camera)

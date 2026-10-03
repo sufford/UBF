@@ -223,7 +223,7 @@ static void ob_wire_color_blend_theme_id(const unsigned char ob_wire_col[4], con
 
 int view3d_effective_drawtype(const struct View3D *v3d)
 {
-	if (v3d->drawtype == OB_RENDER) {
+	if (OB_DRAWTYPE_IS_RENDER(v3d->drawtype)) {
 		return v3d->prev_drawtype;
 	}
 	return v3d->drawtype;
@@ -7586,7 +7586,7 @@ void draw_object(Main *bmain, Scene *scene, ARegion *ar, View3D *v3d, Base *base
 
 	/* maximum drawtype */
 	char dt = v3d->drawtype;
-	if (dt == OB_RENDER) dt = v3d->prev_drawtype;
+	if (OB_DRAWTYPE_IS_RENDER(dt)) dt = v3d->prev_drawtype;
 	dt = MIN2(dt, ob->dt);
 	if (v3d->zbuf == 0 && dt > OB_WIRE) dt = OB_WIRE;
 	short dtx = 0;

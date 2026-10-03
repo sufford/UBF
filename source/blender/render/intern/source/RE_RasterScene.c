@@ -18,6 +18,7 @@
 #include "render_types.h"
 #include "renderdatabase.h"
 #include "RE_Rasterizer.h"
+#include "RE_Prof.h"     /* ★ PROF */
 
 /* ------------------------------------------------------------------------- */
 
@@ -165,26 +166,12 @@ static int bucket_compare(const void *a, const void *b)
 RE_RasterScene *RE_raster_scene_build(RE_Rasterizer *rasty)
 {
     RE_RasterScene *scene = MEM_callocN(sizeof(*scene), "RE_RasterScene");
+    double t_build0 = RE_prof_tick();   /* ★ PROF */
     scene->re = rasty->re;
-
-    /* ★ ОТЛАДКА */
-    int obi_count = 0;
-    int vlr_count = 0;
-    int skipped_hidden = 0;
-
-    printf("[RASTERIZER] scene_build start: instancetable.first=%p\n",
-           (void*)rasty->re->instancetable.first);
 
     for (ObjectInstanceRen *obi = rasty->re->instancetable.first;
          obi; obi = obi->next)
     {
-        obi_count++;
-
-        /* ★ ОТЛАДКА */
-        printf("[RASTERIZER]   obi[%d]: obr=%p, totvlak=%d\n",
-               obi_count - 1, (void*)obi->obr,
-               obi->obr ? obi->obr->totvlak : -1);
-
         ObjectRen *obr = obi->obr;
         RE_RasterBucket *cur_bucket = NULL;
         RE_RasterSlot *cur_slot = NULL;
@@ -197,16 +184,13 @@ RE_RasterScene *RE_raster_scene_build(RE_Rasterizer *rasty)
             int stride;
 
             if (!vlr) {
-                printf("[RASTERIZER]   vlr[%d] NULL, skip\n", v);
                 continue;
             }
 
             if (vlr->flag & R_HIDDEN) {
-                skipped_hidden++;
                 continue;
             }
 
-            vlr_count++;
             stride = vlr->v4 ? 4 : 3;
 
             if (vlr->mat != cur_ma || cur_da == NULL) {
@@ -226,55 +210,8 @@ RE_RasterScene *RE_raster_scene_build(RE_Rasterizer *rasty)
         }
     }
 
-    printf("[RASTERIZER] scene_build end: obi_count=%d, vlr_count=%d, hidden_skipped=%d\n",
-           obi_count, vlr_count, skipped_hidden);
-
-    /* ★ ОТЛАДКА: хеш содержимого сцены (детерминизм исходных данных) */
-    if (getenv("UBF_SDUMP")) {
-        unsigned int h = 2166136261u;
-        int nverts = 0, nprims = 0;
-        for (int i = 0; i < scene->num_buckets; i++) {
-            RE_RasterBucket *b = scene->buckets[i];
-            for (RE_RasterSlot *sl = b->slots.first; sl; sl = sl->next) {
-                for (RE_RasterDisplayArray *da = sl->display_arrays.first; da; da = da->next) {
-                    nverts += da->num_verts;
-                    nprims += da->num_prims;
-                    for (int v = 0; v < da->num_verts; v++) {
-                        const unsigned char *p = (const unsigned char *)&da->verts[v];
-                        for (unsigned k = 0; k < sizeof(RE_RasterVertex); k++)
-                            h = (h ^ p[k]) * 16777619u;
-                    }
-                    for (int k = 0; k < da->num_indices; k++)
-                        h = (h ^ (unsigned int)da->indices[k]) * 16777619u;
-                    for (int k = 0; k < da->num_prims; k++)
-                        h = (h ^ (unsigned int)da->vlr_indices[k]) * 16777619u;
-                }
-            }
-        }
-        printf("[SDUMP] buckets=%d verts=%d prims=%d hash=%08x\n",
-               scene->num_buckets, nverts, nprims, h);
-    }
-
-	/* debug: посмотрим размеры */
-	{
-		int total_slots = 0, total_arrays = 0, total_indices = 0;
-		for (int i = 0; i < scene->num_buckets; i++) {
-			RE_RasterBucket *b = scene->buckets[i];
-			for (RE_RasterSlot *sl = b->slots.first; sl; sl = sl->next) {
-				total_slots++;
-				for (RE_RasterDisplayArray *da = sl->display_arrays.first;
-				     da; da = da->next)
-				{
-					total_arrays++;
-					total_indices += da->num_indices;
-				}
-			}
-		}
-		printf("[RASTERIZER]   slots=%d, arrays=%d, total_indices=%d\n",
-		       total_slots, total_arrays, total_indices);
-	}
-
-	return scene;
+    RE_prof_glob_span(RE_PROF_BUILD, t_build0);   /* ★ PROF */
+    return scene;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -336,6 +273,7 @@ void RE_raster_scene_update_visibility(RE_RasterScene *scene,
     const unsigned int lay = rl->lay;
     const unsigned int lay_zmask = rl->lay_zmask;
     const bool all_z = (rl->layflag & SCE_LAY_ALL_Z) && !(rl->layflag & SCE_LAY_ZMASK);
+    double t_vis0 = RE_prof_tick();   /* ★ PROF */
 
     for (int i = 0; i < scene->num_buckets; i++) {
         RE_RasterBucket *b = scene->buckets[i];
@@ -344,4 +282,6 @@ void RE_raster_scene_update_visibility(RE_RasterScene *scene,
             slot->layer_id = slot->obi->lay;
         }
     }
+
+    RE_prof_glob_span(RE_PROF_VISIBILITY, t_vis0);   /* ★ PROF */
 }
