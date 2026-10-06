@@ -74,6 +74,15 @@ typedef struct RTBuilder {
 
 	/* current depth */
 	int depth;
+
+	/* ★ PROF: переиспользуемая заготовка под SAH-свип (см.
+	 * rtbuild_heuristic_object_split). Раньше буфер выделялся и освобождался
+	 * на КАЖДОМ внутреннем узле дерева — на 2 млн граней это ~1 млн
+	 * malloc/free и порядка 1.7 ГБ трафика аллокаций. Владелец — корневой
+	 * билдер (созданный rtbuild_create), освобождается в rtbuild_free;
+	 * дети получают указатель через rtbuild_get_child. */
+	void *sweep_scratch;
+	int sweep_scratch_size;
 } RTBuilder;
 
 /* used during creation */

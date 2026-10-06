@@ -790,6 +790,20 @@ void RE_InitState(Render *re, Render *source, RenderData *rd,
 		return;
 	}
 
+	/* ★ FAST-путь: приближённый быстрый рендер.
+	 *
+	 * OSA выключается принудительно, и это часть ОПРЕДЕЛЕНИЯ режима, а не
+	 * побочный эффект: свой шейдер подключён только к не-OSA ветке
+	 * (zbufshade_tile, rendercore.c), плюс OSA стоит 8× по числу сэмплов.
+	 * Приближённый путь сознательно платит качеством AA за скорость
+	 * (проект: «кадр должен считаться за секунды, а не минуты»).
+	 * Старые пути (OFF/SCANLINE) не затрагиваются: режим — явная настройка
+	 * scene.render.rasterizer_mode. */
+	if (re->r.rasterizer_mode == RE_RASTERIZER_FAST) {
+		re->r.mode &= ~R_OSA;
+		printf("[FAST] rasterizer_mode=FAST: OSA forced off (approx path)\n");
+	}
+
 	re->r.scemode = check_mode_full_sample(&re->r);
 
 	/* fullsample wants uniform osa levels */
@@ -1494,11 +1508,36 @@ static void threaded_tile_processor(Render *re)
 			 * побитово один кадр); по умолчанию — как в BI. */
 			const char *e = getenv("UBF_TILE");
 			int t = e ? atoi(e) : 256;
+			/* UBF_TILEX / UBF_TILEY — раздельные размеры плитки. Нужны,
+			 * чтобы получить ПОЛОСУ ВО ВСЮ ШИРИНУ при включённом OSA
+			 * (TILEX >= ширины кадра): полоса не режется по x, и если
+			 * остаток инвариантности живёт на обрезке по границе части,
+			 * такая полоса обязана совпасть с кадром целиком побитово. */
+			const char *ex = getenv("UBF_TILEX");
+			const char *ey = getenv("UBF_TILEY");
 
 			if (t < 16)
 				t = 16;
-			tilex = t;
-			tiley = t;
+			tilex = ex ? atoi(ex) : t;
+			tiley = ey ? atoi(ey) : t;
+			if (tilex < 16)
+				tilex = 16;
+			if (tiley < 16)
+				tiley = 16;
+		}
+
+		/* ★ UBF_OSA_PASSES (трек «A»): если кадр собирается ПРОХОДАМИ, то
+		 * плиточной нарезки быть не должно — кадр считается целиком, одним
+		 * партом, а дробление остаётся единственной осью — по проходам.
+		 * Это ровно то, что просит §8: убрать тайлинг и сделать progressive
+		 * refine. Практический эффект: картинка перестаёт зависеть от
+		 * UBF_TILE/UBF_TILEX по построению (один парт независимо от настроек),
+		 * поэтому три эталонных кадра сходятся тождественно. Плиточный путь
+		 * сохранён выключателем: без UBF_OSA_PASSES всё как было.
+		 * Берём максимум от rect и win, чтобы парт гарантированно был один. */
+		if (getenv("UBF_OSA_PASSES")) {
+			tilex = MAX2(re->rectx, re->winx);
+			tiley = MAX2(re->recty, re->winy);
 		}
 
 		re->r.tilex = tilex;
@@ -1506,10 +1545,31 @@ static void threaded_tile_processor(Render *re)
 	}
 
 	/* warning; no return here without closing exr file */
-	RE_parts_init(re, true);
+	/* ★ UBF_PASS_TIME (трек «B»): измеряем ПОСТОЯННЫЕ расходы, которые
+	 * повторяются на КАЖДЫЙ проход. Без этой разбивки непонятно, что именно
+	 * выносить из-под цикла проходов. Диагностика под выключателем, на
+	 * поведение не влияет. */
+	if (getenv("UBF_PASS_TIME")) {
+		double t0= PIL_check_seconds_timer();
+		double t1, t2;
 
-	/* ★ растеризатор: scene + видимость, один раз до потоков */
-	rasterizer_prepare(re);
+		RE_parts_init(re, true);
+		t1= PIL_check_seconds_timer();
+
+		/* ★ растеризатор: scene + видимость, один раз до потоков */
+		rasterizer_prepare(re);
+		t2= PIL_check_seconds_timer();
+
+		printf("PROG time parts_init=%.3f rasterizer_prepare=%.3f const_total=%.3f\n",
+			   t1 - t0, t2 - t1, t2 - t0);
+		fflush(stdout);
+	}
+	else {
+		RE_parts_init(re, true);
+
+		/* ★ растеризатор: scene + видимость, один раз до потоков */
+		rasterizer_prepare(re);
+	}
 
 	/* assuming no new data gets added to dbase... */
 	R = *re;
@@ -1523,6 +1583,19 @@ static void threaded_tile_processor(Render *re)
 
 	/* for panorama we loop over slices */
 	while (find_next_pano_slice(re, &slice, &minx, &viewplane)) {
+		/* ★ R3: кадровый G-буфер на этот проход (размер кадра и матрицы
+		 * уже окончательные). Вне быстрого пути — ничего не делает. */
+		RE_fast_frame_begin(re);
+
+		/* ★ ГИБРИД SSR в BI (шаг 5): волн частей в проходе может быть ДВЕ.
+		 * Первая — обычная (лучи зеркал BI выключены, кадр получает «плоский»
+		 * цвет, а G-буфер — параметры отражения). Резолв решает, где марш
+		 * попал; для остальных зеркальных пикселей запускается ВТОРАЯ волна
+		 * («ремонтный проход»): в ней шейдятся только промахнувшиеся пиксели
+		 * и уже с лучами зеркал, а слияние части идёт по маске. */
+		int bi_round = 0;
+
+	bi_parts_round:
 		/* gather parts into queue */
 		totpart = sort_and_queue_parts(re, minx, workqueue);
 
@@ -1598,6 +1671,52 @@ static void threaded_tile_processor(Render *re)
 		}
 
 		BLI_threadpool_end(&threads);
+
+		/* ★ R3: ЭКРАННЫЕ ЗЕРКАЛА. Все части уже отрисованы и собраны в кадр,
+		 * поэтому отражённый луч может читать пиксели любой части. Резолв
+		 * правит Combined-пасс на месте; вне быстрого пути и без UBF_BI_SSR —
+		 * ничего не делает.
+		 *
+		 * ★ SSR в BI при сборке кадра проходами (UBF_OSA_PASSES): резолв имеет
+		 * смысл только на ПОСЛЕДНЕМ проходе. На промежуточных кадр ещё не
+		 * полон, а главное — резолв правит Combined на месте, поэтому
+		 * повторный резолв смешивал бы экранное отражение само с собой (в
+		 * «flat» уже лежало бы отражение предыдущего прохода). */
+		if (!g_break) {
+			extern int R_prog_pass_end;
+			if (R_prog_pass_end < 0 || R_prog_pass_end >= re->osa) {
+				if (bi_round == 0) {
+					RE_fast_frame_resolve(re);
+
+					/* ★ ГИБРИД (шаг 5): марш промахнулся на части зеркальных
+					 * пикселей — им нужен луч BI. Возвращаем части в очередь и
+					 * уходим на вторую волну: шейдиться будут только помеченные
+					 * пиксели (RE_bi_ssr_repair_skip), а лучи зеркал в ней
+					 * разрешены (RE_bi_ssr_repair_pass снимает запрет в
+					 * ray_trace), слияние части — по маске (render_result.c). */
+					if (RE_bi_ssr_repair_pending()) {
+						RenderPart *rpa;
+
+						RE_bi_ssr_repair_set(1);
+						for (rpa = re->parts.first; rpa; rpa = rpa->next) {
+							rpa->status = PART_STATUS_NONE;
+							rpa->nr = 0;
+						}
+						re->i.partsdone = 0;
+						bi_round = 1;
+						goto bi_parts_round;
+					}
+				}
+				else {
+					/* Ремонтный проход закончен: на промахах в кадре луч BI, на
+					 * попаданиях — «плоский» цвет, поэтому экранное отражение
+					 * смешиваем теперь и только в попавшие пиксели. */
+					RE_bi_ssr_repair_set(0);
+					RE_fast_frame_resolve_blend(re);
+				}
+			}
+		}
+		RE_fast_frame_end();
 
 		if ((g_break=re->test_break(re->tbh)))
 			break;
@@ -1736,7 +1855,83 @@ static void do_render_3d(Render *re)
 		/* software rasterizer (custom fork): scene строится и видимость
 		 * фиксируется в RE_TileProcessor, куда приходят все пути,
 		 * включая viewport Rendered */
-		threaded_tile_processor(re);
+		{
+			/* ★ UBF_PROGRESSIVE: кадр считается ЦЕЛИКОМ повторными проходами
+			 * с накоплением. Проход k кладёт сэмплы [k*S, (k+1)*S), и после
+			 * каждого прохода картинка обновляется. Накопление идёт в тот же
+			 * полноэкранный буфер результата, а деление на число сэмплов
+			 * делается один раз в конце, поэтому сумма проходов даёт тот же
+			 * кадр, что и одно прохождение со всеми сэмплами.
+			 * Без UBF_PROGRESSIVE — ровно один проход, старый путь не тронут. */
+			extern int R_prog_pass_start, R_prog_pass_end;
+			extern int R_prog_accumulate;
+			/* ★ ВНИМАНИЕ: отдельный выключатель, НЕ UBF_PROGRESSIVE.
+			 * Проверено замером: повторный вызов threaded_tile_processor
+			 * НЕ накапливает результат — буфер результата обнуляется на
+			 * каждом проходе, поэтому кадр получается как от последнего
+			 * прохода (2 прохода дают max=132 против однопроходного кадра,
+			 * 8 проходов — max=205). Пока накопление по проходам не сделано
+			 * правильно (нужен постоянный буфер вне плиточного процессора),
+			 * механизм выключен по умолчанию и включается только явно. */
+			const char *pe= getenv("UBF_OSA_PASSES");
+			int pass= 0;
+
+			if (pe) {
+				/* ★ имя специально отличается от выключателя: раньше здесь
+				 * читалось UBF_OSA_PASS (единственное), а выключатель —
+				 * UBF_OSA_PASSES (множественное), из-за чего размер порции
+				 * молча оставался 4 и замеры «разных» порций были одним и тем
+				 * же замером. Проверено по логу: при UBF_OSA_PASSES=8 проходы
+				 * всё равно шли [0,4) и [4,8). */
+				const char *se= getenv("UBF_OSA_PASS_SIZE");
+				pass= se ? atoi(se) : 4;
+				if (pass < 1) pass= 1;
+			}
+
+			if (!pe || pass >= re->r.osa) {
+				R_prog_pass_start= 0;
+				R_prog_pass_end= -1;
+				threaded_tile_processor(re);
+			}
+			else {
+				int s;
+
+				/* проходы складываются: слияние части в кадр — с накоплением,
+				 * нормализация на число сэмплов произойдёт один раз в конце */
+				R_prog_accumulate= 1;
+
+				for (s= 0; s < re->r.osa; s+= pass) {
+					R_prog_pass_start= s;
+					R_prog_pass_end= MIN2(s + pass, re->r.osa);
+
+					threaded_tile_processor(re);
+
+					/* ★ диагностика проходов: состояние кадра после прохода
+					 * (берём слой: у многослойного результата re->result->rectf
+					 * обычно NULL, значения живут в rectf слоя) */
+					if (getenv("UBF_OSA_PASSES")) {
+						if (re->result && re->result->rectf)
+							printf("PROG pass [%d,%d) frame[0..3]=%.6f %.6f %.6f %.6f\n",
+							       R_prog_pass_start, R_prog_pass_end,
+							       re->result->rectf[0], re->result->rectf[1],
+							       re->result->rectf[2], re->result->rectf[3]);
+						else
+							printf("PROG pass [%d,%d) result->rectf=NULL\n",
+							       R_prog_pass_start, R_prog_pass_end);
+					}
+
+					if (re->test_break(re->tbh))
+						break;
+
+					if (render_display_update_enabled(re))
+						re->display_update(re->duh, re->result, NULL);
+				}
+
+				R_prog_pass_start= 0;
+				R_prog_pass_end= -1;
+				R_prog_accumulate= 0;
+			}
+		}
 
 #ifdef WITH_FREESTYLE
 		/* Freestyle */

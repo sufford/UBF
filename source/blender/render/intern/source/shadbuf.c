@@ -2139,8 +2139,21 @@ static void isb_add_shadfac(ISBShadfacA **isbsapp, MemArena *mem, int obi, int f
 	float shadfacf;
 
 	/* in osa case, the samples were filled in with factor 1.0/R.osa. if fewer samples we have to correct */
-	if (R.osa)
-		shadfacf= ((float)shadfac*R.osa)/(4096.0f*samples);
+	if (R.osa) {
+		/* ★ UBF_OSA_PASSES: при прогрессивных проходах в этом вызове
+		 * растеризуется только ЧАСТЬ сэмплов, и «коррекция» R.osa/samples
+		 * превращается в усиление теней во столько раз, во сколько раз порция
+		 * меньше полного числа сэмплов (2 прохода по 4 -> каждый сэмпл тени
+		 * вдвое сильнее, и сумма проходов даёт двойные тени). Замерено:
+		 * кадр в 2/4/8 проходов отличается от однопроходного на 12% пикселей,
+		 * max=126. Поэтому на прогрессивном пути нормируем по ПОЛНОМУ числу
+		 * сэмплов — ровно как в однопроходном рендере (там samples == R.osa и
+		 * множитель равен единице). */
+		extern int R_prog_pass_end;
+		int eff_samples= (R_prog_pass_end >= 0) ? R.osa : samples;
+
+		shadfacf= ((float)shadfac*R.osa)/(4096.0f*eff_samples);
+	}
 	else
 		shadfacf= ((float)shadfac)/(4096.0f);
 

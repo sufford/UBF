@@ -140,6 +140,15 @@ float RE_rayobject_cost(RayObject *r);
  */
 int RE_rayobject_intersect(RayObject *r, struct Isect *i);
 
+/* ★ UBF: переключатели сборки BVH, которые живут в .blend
+ * (DNA_scene_types.h, RenderData.ubf_bvh_par и .ubf_switches, см. rna_scene.c).
+ * У сборщиков BVH нет доступа к сцене, поэтому build_raytree() (rayshade.c)
+ * кладёт сюда значения из файла одной функцией, а геттеры отдают их с
+ * приоритетом переменной окружения (UBF_BVH_PAR / UBF_BVH_RTSORT / UBF_BVH_CUTPAR
+ * перекрывают файл — этого требуют стенды, приёмка и замеры). */
+void RE_rayobject_ubf_bvh_set(int par_chunks, int rtsort, int cutpar);
+int  RE_rayobject_ubf_bvh_rtsort(void);
+
 #ifdef __cplusplus
 }
 #endif

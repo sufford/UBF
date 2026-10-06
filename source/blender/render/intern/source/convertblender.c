@@ -31,6 +31,7 @@
 
 #include "BLI_math.h"
 #include "BLI_blenlib.h"
+#include "BLI_ghash.h"
 #include "BLI_utildefines.h"
 #include "BLI_rand.h"
 #include "BLI_memarena.h"
@@ -95,6 +96,7 @@
 #include "zbuf.h"
 #include "sunsky.h"
 #include "RE_Rasterizer.h"
+#include "RE_Prof.h"     /* ★ PROF — временная обвязка замера */
 
 /* 10 times larger than normal epsilon, test it on default nurbs sphere with ray_transp (for quad detection) */
 /* or for checking vertex normal flips */
@@ -2453,6 +2455,7 @@ static void init_render_dm(DerivedMesh *dm, Render *re, ObjectRen *obr,
 	MVert *mvert = NULL;
 	MFace *mface;
 	Material *ma;
+	double prof_t_step;   /* ★ PROF */
 #ifdef WITH_FREESTYLE
 	const int *index_mf_to_mpoly = NULL;
 	const int *index_mp_to_orig = NULL;
@@ -2463,6 +2466,7 @@ static void init_render_dm(DerivedMesh *dm, Render *re, ObjectRen *obr,
 	mvert= dm->getVertArray(dm);
 	totvert= dm->getNumVerts(dm);
 
+	prof_t_step = RE_prof_tick();   /* ★ PROF: цикл вершин */
 	for (a=0; a<totvert; a++, mvert++) {
 		ver= RE_findOrAddVert(obr, obr->totvert++);
 		copy_v3_v3(ver->co, mvert->co);
@@ -2473,6 +2477,7 @@ static void init_render_dm(DerivedMesh *dm, Render *re, ObjectRen *obr,
 			orco+=3;
 		}
 	}
+	RE_prof_glob_span(RE_PROF_MESH_VERT, prof_t_step);   /* ★ PROF */
 
 	if (!timeoffset) {
 		/* store customdata names, because DerivedMesh is freed */
@@ -2482,6 +2487,7 @@ static void init_render_dm(DerivedMesh *dm, Render *re, ObjectRen *obr,
 
 		/* faces in order of color blocks */
 		vertofs= obr->totvert - totvert;
+		prof_t_step = RE_prof_tick();   /* ★ PROF: цикл граней */
 		for (mat_iter= 0; (mat_iter < ob->totcol || (mat_iter==0 && ob->totcol==0)); mat_iter++) {
 
 			ma= give_render_material(re, ob, mat_iter+1);
@@ -2562,6 +2568,8 @@ static void init_render_dm(DerivedMesh *dm, Render *re, ObjectRen *obr,
 				}
 			}
 		}
+
+		RE_prof_glob_span(RE_PROF_MESH_FACE, prof_t_step);   /* ★ PROF: цикл граней */
 
 		/* Normals */
 		calc_vertexnormals(re, obr, 1, 0, 0);
@@ -3112,6 +3120,102 @@ static bool has_freestyle_edge_mark(EdgeHash *edge_hash, int v1, int v2)
 }
 #endif
 
+/* ★ R5: КЭШ РЕНДЕРНОЙ ГЕОМЕТРИИ ДЛЯ БЫСТРОГО ПУТИ.
+ *
+ * Замер (R4): кадр боевой сцены 3.95 с, из них 2.99 с — подготовка сцены, а в
+ * ней 2.50 с — mesh_create_derived_render по 7594 объектам, и почти вся эта
+ * цена это вычисление модификаторов (SUBSURF/BEVEL/SOLIDIFY на 3428 объектах).
+ * Платится КАЖДЫЙ кадр целиком: mesh_create_derived_render (DerivedMesh.c:2786)
+ * зовёт mesh_calc_modifiers БЕЗУСЛОВНО, мимо кэша ob->derivedFinal/lastDataMask,
+ * которым пользуется вьюпортный путь (mesh_get_derived_final, DerivedMesh.c:2748).
+ *
+ * Здесь рендерный DM кладётся в ТОТ ЖЕ кэш объекта, и следующий кадр берёт его
+ * оттуда. Признак «данные объекта не менялись» — не наши догадки про recalc
+ * (депграф их обнуляет: BKE_object_handle_update_ex, object.c:2674), а сам
+ * Blender: любая пометка объекта зовёт BKE_object_free_derived_caches(), который
+ * обнуляет ob->derivedFinal. Поэтому «ob->derivedFinal всё ещё указывает на наш
+ * DM» и есть ответ «Blender считает данные неизменными». Ровно на этот контракт
+ * опирается вьюпорт, и мы не изобретаем свой.
+ *
+ * Почему нужна боковая таблица (Object* -> наш DM): ob->derivedFinal может
+ * оказаться чужим DM (вьюпорт перестроил под себя) — тогда переиспользовать его
+ * как рендерный нельзя, надо строить свой.
+ *
+ * ob->lastDataMask намеренно ставится в 0: это метка «DM построен для рендера и
+ * чужим потребителям не годится», поэтому вьюпорт при обращении перестроит его
+ * под себя (и тем самым сбросит наш кэш — это осознанный выбор в пользу
+ * корректности вьюпорта, а не тихой подмены ему геометрии рендерного качества).
+ *
+ * Выключатель: UBF_FAST_DMCACHE=0. Работает только в режиме FAST. */
+static GHash *re_fast_dm_cache = NULL;
+
+static bool re_fast_dm_cache_enabled(void)
+{
+	static int env = -1;
+
+	if (env < 0) {
+		const char *e = getenv("UBF_FAST_DMCACHE");
+		env = (e && e[0] == '0') ? 0 : 1;
+	}
+	return env != 0;
+}
+
+/* Возвращает DerivedMesh объекта. *r_cached = true означает «DM теперь живёт в
+ * кэше объекта, освобождать его вызывающему НЕЛЬЗЯ». */
+static DerivedMesh *init_render_mesh_derived(Render *re, Object *ob,
+                                             CustomDataMask mask, bool *r_cached)
+{
+	DerivedMesh *dm, *prev;
+	double t_dm0 = RE_prof_tick();   /* ★ PROF */
+
+	*r_cached = false;
+
+	/* ВАЖНО: именно re->r.rasterizer_mode, а не RE_shader_fast(): та читает
+	 * ГЛОБАЛЬНЫЙ R, а он копируется из re позже, уже в конвейере
+	 * (pipeline.c: R = *re), то есть на этапе конвертации сцены ещё не готов. */
+	if (re->r.rasterizer_mode != RE_RASTERIZER_FAST || !re_fast_dm_cache_enabled()) {
+		return mesh_create_derived_render(re->scene, ob, mask);
+	}
+
+	RE_prof_count_dm(RE_PROF_DM_ALIVE, ob->derivedFinal != NULL);   /* ★ PROF */
+
+	if (re_fast_dm_cache == NULL)
+		re_fast_dm_cache = BLI_ghash_ptr_new("RE fast dm cache");
+
+	prev = BLI_ghash_lookup(re_fast_dm_cache, ob);
+
+	/* Blender не трогал derivedFinal => объект не менялся => берём свой DM. */
+	if (prev && ob->derivedFinal == prev) {
+		RE_prof_count_dm(RE_PROF_DM_REUSE, 1);   /* ★ PROF */
+		*r_cached = true;
+		return prev;
+	}
+
+	dm = mesh_create_derived_render(re->scene, ob, mask);
+	RE_prof_count_dm(RE_PROF_DM_BUILD, 1);   /* ★ PROF */
+
+	/* ★ PROF: найти «монстров» — объекты, чьё построение решает всё время. */
+	if (RE_prof_active()) {
+		double dt = RE_prof_tick() - t_dm0;
+		if (dt > 0.05)
+			printf("[FAST-DM] медленно: %s = %.3f s | вершин=%d граней=%d"
+			       " (примерно %.1f МБ данных)\n",
+			       ob->id.name + 2, dt,
+			       dm->getNumVerts(dm), dm->getNumTessFaces(dm),
+			       (dm->getNumVerts(dm) * 32.0 +
+			        dm->getNumTessFaces(dm) * 24.0) / (1024.0 * 1024.0));
+	}
+
+	BKE_object_free_derived_caches(ob);   /* освободит прежний DM, если он был */
+	ob->derivedFinal = dm;
+	ob->derivedFinal->needsFree = 0;
+	ob->lastDataMask = 0;   /* см. шапку: чужим потребителям не годится */
+	BLI_ghash_insert(re_fast_dm_cache, ob, dm);
+
+	*r_cached = true;
+	return dm;
+}
+
 static void init_render_mesh(Render *re, ObjectRen *obr, int timeoffset)
 {
 	Object *ob= obr->ob;
@@ -3134,6 +3238,8 @@ static void init_render_mesh(Render *re, ObjectRen *obr, int timeoffset)
 	bool use_original_normals = false;
 	int recalc_normals = 0;	/* false by default */
 	int negative_scale;
+	double prof_t_step;   /* ★ PROF */
+	bool dm_cached = false;   /* ★ R5: DM взят/положен в кэш объекта — не освобождать */
 #ifdef WITH_FREESTYLE
 	FreestyleFace *ffa;
 #endif
@@ -3200,17 +3306,19 @@ static void init_render_mesh(Render *re, ObjectRen *obr, int timeoffset)
 	mask |= CD_MASK_ORIGINDEX | CD_MASK_FREESTYLE_EDGE | CD_MASK_FREESTYLE_FACE;
 #endif
 
+	prof_t_step = RE_prof_tick();   /* ★ PROF */
 	if (re->r.scemode & R_VIEWPORT_PREVIEW)
 		dm= mesh_create_derived_view(re->scene, ob, mask);
 	else
-		dm= mesh_create_derived_render(re->scene, ob, mask);
+		dm= init_render_mesh_derived(re, ob, mask, &dm_cached);   /* ★ R5 */
+	RE_prof_glob_span(RE_PROF_MESH_DM, prof_t_step);   /* ★ PROF: построение DerivedMesh */
 	if (dm==NULL) return;	/* in case duplicated object fails? */
 
 	mvert= dm->getVertArray(dm);
 	totvert= dm->getNumVerts(dm);
 
 	if (totvert == 0) {
-		dm->release(dm);
+		if (!dm_cached) dm->release(dm);   /* ★ R5 */
 		return;
 	}
 
@@ -3248,6 +3356,7 @@ static void init_render_mesh(Render *re, ObjectRen *obr, int timeoffset)
 #endif
 		}
 
+		prof_t_step = RE_prof_tick();   /* ★ PROF: цикл вершин */
 		for (a=0; a<totvert; a++, mvert++) {
 			ver= RE_findOrAddVert(obr, obr->totvert++);
 			copy_v3_v3(ver->co, mvert->co);
@@ -3276,6 +3385,7 @@ static void init_render_mesh(Render *re, ObjectRen *obr, int timeoffset)
 					*origindex = a;
 			}
 		}
+		RE_prof_glob_span(RE_PROF_MESH_VERT, prof_t_step);   /* ★ PROF: цикл вершин */
 
 		if (!timeoffset) {
 			short (*lnp)[4][3] = NULL;
@@ -3302,6 +3412,7 @@ static void init_render_mesh(Render *re, ObjectRen *obr, int timeoffset)
 
 			/* faces in order of color blocks */
 			vertofs= obr->totvert - totvert;
+			prof_t_step = RE_prof_tick();   /* ★ PROF: цикл граней */
 			for (a1=0; (a1<ob->totcol || (a1==0 && ob->totcol==0)); a1++) {
 
 				ma= give_render_material(re, ob, a1+1);
@@ -3497,6 +3608,7 @@ static void init_render_mesh(Render *re, ObjectRen *obr, int timeoffset)
 			if (edge_hash)
 				BLI_edgehash_free(edge_hash, NULL);
 #endif
+			RE_prof_glob_span(RE_PROF_MESH_FACE, prof_t_step);   /* ★ PROF: цикл граней */
 
 			/* exception... we do edges for wire mode. potential conflict when faces exist... */
 			end= dm->getNumEdges(dm);
@@ -3567,7 +3679,7 @@ static void init_render_mesh(Render *re, ObjectRen *obr, int timeoffset)
 
 	MEM_SAFE_FREE(loop_nors);
 
-	dm->release(dm);
+	if (!dm_cached) dm->release(dm);   /* ★ R5: кэшированный DM освобождает сам Blender */
 }
 
 /* ------------------------------------------------------------------------- */
@@ -5206,6 +5318,8 @@ void RE_Database_FromScene(Render *re, Main *bmain, Scene *scene, unsigned int l
 	Object *camera;
 	float mat[4][4];
 	float amb[3];
+	double prof_t_scene = RE_prof_tick();   /* ★ PROF: вся подготовка сцены */
+	double prof_t_step;                     /* ★ PROF: текущий подэтап */
 
 	re->main= bmain;
 	re->scene= scene;
@@ -5236,10 +5350,12 @@ void RE_Database_FromScene(Render *re, Main *bmain, Scene *scene, unsigned int l
 		lay &= 0xFF000000;
 
 	/* applies changes fully */
+	prof_t_step = RE_prof_tick();   /* ★ PROF */
 	if ((re->r.scemode & (R_NO_FRAME_UPDATE|R_BUTS_PREVIEW|R_VIEWPORT_PREVIEW))==0) {
 		BKE_scene_update_for_newframe(re->eval_ctx, re->main, re->scene, lay);
 		render_update_anim_renderdata(re, &re->scene->r);
 	}
+	RE_prof_glob_span(RE_PROF_SCENE_DEPS, prof_t_step);   /* ★ PROF */
 
 	/* if no camera, viewmat should have been set! */
 	if (use_camera_view && camera) {
@@ -5274,7 +5390,9 @@ void RE_Database_FromScene(Render *re, Main *bmain, Scene *scene, unsigned int l
 	set_node_shader_lamp_loop(shade_material_loop);
 
 	/* MAKE RENDER DATA */
+	prof_t_step = RE_prof_tick();   /* ★ PROF */
 	database_init_objects(re, lay, 0, 0, NULL, 0);
+	RE_prof_glob_span(RE_PROF_SCENE_DB, prof_t_step);   /* ★ PROF */
 
 	if (!re->test_break(re->tbh)) {
 		set_material_lightgroups(re);
@@ -5289,6 +5407,8 @@ void RE_Database_FromScene(Render *re, Main *bmain, Scene *scene, unsigned int l
 		re->i.totlamp= re->totlamp;
 		re->stats_draw(re->sdh, &re->i);
 	}
+
+	RE_prof_glob_span(RE_PROF_SCENE_PREP, prof_t_scene);   /* ★ PROF */
 }
 
 void RE_Database_Preprocess(Render *re)
@@ -5304,14 +5424,27 @@ void RE_Database_Preprocess(Render *re)
 		re->i.infostr = IFACE_("Creating Shadowbuffers");
 		re->stats_draw(re->sdh, &re->i);
 
-		/* SHADOW BUFFER */
-		threaded_makeshadowbufs(re);
+		/* SHADOW BUFFER
+		 * ★ FAST: теней нет вообще (быстрый шейдер их не сэмплит), значит и
+		 * теневые буферы не нужны. Они строятся для всех спот-ламп с
+		 * LA_SHAD_BUF — на боевой сцене это заметная часть подготовки.
+		 * lar->shb при этом остаётся аллоцированным (initshadowbuf), но с
+		 * пустым списком буферов: testshadowbuf() на таком сразу отдаёт 1.0
+		 * (shadbuf.c, первая проверка), то есть «тени нет» — это и нужно. */
+		if (re->r.rasterizer_mode != RE_RASTERIZER_FAST)
+			threaded_makeshadowbufs(re);
 
 		/* old code checked for internal render (aka not yafray) */
 		{
 			/* raytree */
 			if (!re->test_break(re->tbh)) {
-				if (re->r.mode & R_RAYTRACE) {
+				/* ★ FAST: октодерево не строим. Оно нужно только лучам
+				 * зеркал/теней/AO, а быстрый путь теней и AO не считает,
+				 * а зеркала берёт из экранного буфера (RE_Fast). Сборка
+				 * дерева — 4.2 с из 8.3 с кадра, это главный постоянный
+				 * расход. Кто ещё ходит в re->raytree, сам проверяет его
+				 * на NULL (RE_Mirror.c:283, rayshade.c, volumetric.c). */
+				if ((re->r.mode & R_RAYTRACE) && !RE_fast_skip_raytree(re)) {
 					makeraytree(re);
 				}
 			}
@@ -6011,14 +6144,14 @@ void RE_Database_Baking(Render *re, Main *bmain, Scene *scene, unsigned int lay,
 
 	set_material_lightgroups(re);
 
-	/* SHADOW BUFFER */
+	/* SHADOW BUFFER (в FAST не нужны — см. пояснение у основного вызова) */
 	if (type!=RE_BAKE_LIGHT)
-		if (re->r.mode & R_SHADOW)
+		if ((re->r.mode & R_SHADOW) && re->r.rasterizer_mode != RE_RASTERIZER_FAST)
 			threaded_makeshadowbufs(re);
 
 	/* raytree */
 	if (!re->test_break(re->tbh))
-		if (re->r.mode & R_RAYTRACE)
+		if ((re->r.mode & R_RAYTRACE) && !RE_fast_skip_raytree(re))
 			makeraytree(re);
 
 	/* point density texture */

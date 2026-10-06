@@ -51,6 +51,8 @@
 #include "intern/openexr/openexr_multi.h"
 
 #include "RE_engine.h"
+/* ★ SSR в BI, гибрид (шаг 5): RE_bi_ssr_repair_pass() — слияние части по маске. */
+#include "RE_Rasterizer.h"
 
 #include "render_result.h"
 #include "render_types.h"
@@ -761,10 +763,13 @@ bool render_result_has_views(RenderResult *rr)
 
 /*********************************** Merge ***********************************/
 
-static void do_merge_tile(RenderResult *rr, RenderResult *rrpart, float *target, float *tile, int pixsize)
+static void do_merge_tile(RenderResult *rr, RenderResult *rrpart, float *target, float *tile, int pixsize, int accumulate)
 {
 	int y, tilex, tiley;
 	size_t ofs, copylen;
+	int rowpx, fx0, fy0;
+	int copied_repair = 0;
+	const int repair = RE_bi_ssr_repair_pass();   /* ★ SSR в BI, гибрид (шаг 5) */
 
 	copylen = tilex = rrpart->rectx;
 	tiley = rrpart->recty;
@@ -783,14 +788,61 @@ static void do_merge_tile(RenderResult *rr, RenderResult *rrpart, float *target,
 		target += pixsize * ofs;
 	}
 
+	/* ★ диагностика проходов: что уже лежит в кадре ДО сложения этой части */
+	if (accumulate && getenv("UBF_OSA_PASSES"))
+		printf("PROG merge acc tile=(%d,%d) before=%.6f tile0=%.6f crop=%d\n",
+		       rrpart->tilerect.xmin, rrpart->tilerect.ymin,
+		       target[0], tile[0], rrpart->crop);
+
+	/* ★ ГИБРИД (шаг 5): в ремонтном проходе шейдились только помеченные
+	 * пиксели (те, где марш промахнулся и нужен луч BI). Поэтому переносить в
+	 * кадр надо ТОЛЬКО их: обычный memcpy всей плитки затёр бы готовые
+	 * пиксели кадра значениями из буфера части, которого для них нет.
+	 * Маска — в КАДРОВЫХ координатах, отсюда fx0/fy0 = начало плитки. */
+	rowpx = (int)copylen;
+	fx0 = rrpart->tilerect.xmin + rrpart->crop;
+	fy0 = rrpart->tilerect.ymin + rrpart->crop;
+
 	copylen *= sizeof(float) * pixsize;
 	tilex *= pixsize;
 	ofs = pixsize * rr->rectx;
 
 	for (y = 0; y < tiley; y++) {
-		memcpy(target, tile, copylen);
+		if (repair) {
+			int i;
+
+			for (i = 0; i < rowpx; i++) {
+				if (RE_bi_ssr_repair_skip(fx0 + i, fy0 + y))
+					continue;
+				memcpy(target + pixsize * i, tile + pixsize * i, sizeof(float) * pixsize);
+				copied_repair++;
+			}
+		}
+		else if (accumulate) {
+			/* ★ UBF_OSA_PASSES: прогрессивные проходы. Каждый проход
+			 * добавляет в кадр только СВОИ сэмплы, поэтому результат части
+			 * надо складывать с уже накопленным, а не затирать его memcpy
+			 * (иначе виден только последний проход — замерено: 2 прохода
+			 * давали max=132 против однопроходного кадра). Нормализация на
+			 * число сэмплов делается один раз в конце, при переводе
+			 * float-кадра в байты, поэтому здесь делить нельзя. */
+			int i, n = (int)(copylen / sizeof(float));
+
+			for (i = 0; i < n; i++)
+				target[i] += tile[i];
+		}
+		else
+			memcpy(target, tile, copylen);
+
 		target += ofs;
 		tile += tilex;
+	}
+
+	/* ★ Диагностика гибрида: сколько пикселей слияние реально перенесло. */
+	if (repair && getenv("UBF_BI_SSR_DEBUG")) {
+		printf("[BI-SSR] merge по маске: %d из %d (плитка с %d,%d, %dx%d)\n",
+		       copied_repair, rowpx * tiley, fx0, fy0, rowpx, tiley);
+		fflush(stdout);
 	}
 }
 
@@ -801,6 +853,9 @@ void render_result_merge(RenderResult *rr, RenderResult *rrpart)
 {
 	RenderLayer *rl, *rlp;
 	RenderPass *rpass, *rpassp;
+
+	/* ★ UBF_OSA_PASSES: в прогрессивном режиме проходы складываются */
+	extern int R_prog_accumulate;
 
 	for (rl = rr->layers.first; rl; rl = rl->next) {
 		rlp = RE_GetRenderLayer(rrpart, rl->name);
@@ -814,7 +869,7 @@ void render_result_merge(RenderResult *rr, RenderResult *rrpart)
 				if (strcmp(rpassp->fullname, rpass->fullname) != 0)
 					continue;
 
-				do_merge_tile(rr, rrpart, rpass->rect, rpassp->rect, rpass->channels);
+				do_merge_tile(rr, rrpart, rpass->rect, rpassp->rect, rpass->channels, R_prog_accumulate);
 
 				/* manually get next render pass */
 				rpassp = rpassp->next;

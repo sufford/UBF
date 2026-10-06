@@ -4459,6 +4459,7 @@ static void rna_def_scene_game_data(BlenderRNA *brna)
 	static const EnumPropertyItem physics_engine_items[] = {
 		{WOPHY_NONE, "NONE", 0, "None", "Don't use a physics engine"},
 		{WOPHY_BULLET, "BULLET", 0, "Bullet", "Use the Bullet physics engine"},
+		{WOPHY_BOX3D, "BOX3D", 0, "Box3D", "Use the Box3D physics engine"},
 		{0, NULL, 0, NULL, NULL}
 	};
 
@@ -5776,6 +5777,8 @@ static void rna_def_scene_render_data(BlenderRNA *brna)
 		{RE_RASTERIZER_OFF, "OFF", 0, "Off", "Use the built-in rasterizer"},
 		{RE_RASTERIZER_SCANLINE, "SCANLINE", 0, "Scanline",
 		 "Use the software rasterizer (scanline storage)"},
+		{RE_RASTERIZER_FAST, "FAST", 0, "Fast (approximate)",
+		 "Software rasterizer + own approximate shader: fast, not bit-identical to Blender Internal"},
 		{0, NULL, 0, NULL, NULL}
 	};
 
@@ -6078,6 +6081,60 @@ static void rna_def_scene_render_data(BlenderRNA *brna)
 	RNA_def_property_enum_items(prop, rasterizer_mode_items);
 	RNA_def_property_ui_text(prop, "Rasterizer",
 	                         "Which rasterizer to use for F12 renders and the Rendered viewport");
+	RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, NULL);
+
+	/* custom fork: SSR в BI (экранные зеркала). Живёт в .blend, видно в UI
+	 * (Render → Dimensions/Output, рядом с Rasterizer).
+	 * ВАЖНО: это основной выключатель; переменная окружения UBF_BI_SSR при
+	 * запуске ПЕРЕОПРЕДЕЛЯЕТ его (для стендов приёмки и замеров). */
+	prop = RNA_def_property(srna, "ubf_bi_ssr", PROP_BOOLEAN, PROP_NONE);
+	RNA_def_property_boolean_sdna(prop, NULL, "ubf_bi_ssr", 1);
+	RNA_def_property_ui_text(prop, "Screen-Space Reflections (BI)",
+	                         "Считать отражения зеркал экранным маршем в BI вместо лучей "
+	                         "(попадание — экранный цвет, промах — луч BI)");
+	RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, NULL);
+
+	/* custom fork: боевые выключатели скорости (Render → Anti-Aliasing).
+	 * Живут в .blend (RenderData.ubf_bvh_par / .ubf_switches). Схема та же, что
+	 * у ubf_bi_ssr: если при запуске задана соответствующая переменная
+	 * окружения, она ПЕРЕОПРЕДЕЛЯЕТ поле файла — это нужно стендам, приёмке и
+	 * замерам, которые обязаны получать одно и то же независимо от сцены. */
+	prop = RNA_def_property(srna, "ubf_bvh_par", PROP_INT, PROP_NONE);
+	RNA_def_property_int_sdna(prop, NULL, "ubf_bvh_par");
+	RNA_def_property_range(prop, 0, 256);
+	RNA_def_property_ui_text(prop, "Parallel BVH build",
+	                         "Сколько кусков сборки BVH; 0 — прежняя последовательная "
+	                         "сборка (переменная окружения UBF_BVH_PAR важнее)");
+	RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, NULL);
+
+	/* ВНИМАНИЕ: четыре галочки ниже читают биты ubf_switches ОБРАТНО — бит
+	 * означает, что ручка ВЫКЛЮЧЕНА (RNA_def_property_boolean_negative_sdna).
+	 * Так сделано ради совместимости: в файлах, сохранённых до появления этих
+	 * полей, там нули, а нули должны значить «как сейчас» — то есть включено.
+	 * C-сторона читает те же биты той же логикой (см. particle.c, svbvh.cpp). */
+	prop = RNA_def_property(srna, "ubf_bvh_rtsort", PROP_BOOLEAN, PROP_NONE);
+	RNA_def_property_boolean_negative_sdna(prop, NULL, "ubf_switches", 1);
+	RNA_def_property_ui_text(prop, "Parallel axis sorts",
+	                         "Параллельные сортировки осей при сборке BVH (UBF_BVH_RTSORT)");
+	RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, NULL);
+
+	prop = RNA_def_property(srna, "ubf_bvh_cutpar", PROP_BOOLEAN, PROP_NONE);
+	RNA_def_property_boolean_negative_sdna(prop, NULL, "ubf_switches", 2);
+	RNA_def_property_ui_text(prop, "Parallel level split",
+	                         "Параллельное разбиение узлов при сборке BVH (UBF_BVH_CUTPAR)");
+	RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, NULL);
+
+	prop = RNA_def_property(srna, "ubf_psys_par", PROP_BOOLEAN, PROP_NONE);
+	RNA_def_property_boolean_negative_sdna(prop, NULL, "ubf_switches", 4);
+	RNA_def_property_ui_text(prop, "Parallel hair path cache",
+	                         "Параллельный расчёт pathcache волос (UBF_PSYS_PAR)");
+	RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, NULL);
+
+	prop = RNA_def_property(srna, "ubf_hair_cache", PROP_BOOLEAN, PROP_NONE);
+	RNA_def_property_boolean_negative_sdna(prop, NULL, "ubf_switches", 8);
+	RNA_def_property_ui_text(prop, "Hair recalc cache",
+	                         "Не пересчитывать рост волос на следующих кадрах, если входы "
+	                         "те же (UBF_HAIR_CACHE)");
 	RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, NULL);
 
 	/* motion blur */

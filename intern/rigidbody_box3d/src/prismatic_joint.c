@@ -307,7 +307,12 @@ void b3PreparePrismaticJoint( b3JointSim* base, b3StepContext* context )
 	b3Body* bodyA = b3Array_Get( world->bodies, base->bodyIdA  );
 	b3Body* bodyB = b3Array_Get( world->bodies, base->bodyIdB  );
 
-	B3_ASSERT( bodyB->setIndex == b3_awakeSet );
+	/* Fork patch (UBF):  the strict "body B is awake" assertion is relaxed to the
+	 * contract the other joints use.  Body B is a fixed anchor whenever it is
+	 * static or kinematic, and the index assignment below already handles a body
+	 * B that is not in the awake set.  Without this a slider attached to a static
+	 * object could not be built in a debug build. */
+	B3_ASSERT( bodyA->setIndex == b3_awakeSet || bodyB->setIndex == b3_awakeSet );
 	b3SolverSet* setA = b3Array_Get( world->solverSets, bodyA->setIndex  );
 	b3SolverSet* setB = b3Array_Get( world->solverSets, bodyB->setIndex  );
 

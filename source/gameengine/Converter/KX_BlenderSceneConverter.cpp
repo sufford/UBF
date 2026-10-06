@@ -41,6 +41,7 @@
 #include "BL_System.h"
 
 #include "DummyPhysicsEnvironment.h"
+#include "B3DPhysicsEnvironment.h"
 
 
 #ifdef WITH_BULLET
@@ -244,6 +245,15 @@ void KX_BlenderSceneConverter::ConvertScene(KX_Scene *destinationscene, RAS_IRas
 			break;
 		}
 #endif
+	case WOPHY_BOX3D:
+		{
+			SYS_SystemHandle syshandle = SYS_GetSystem(); /*unused*/
+			int visualizePhysics = SYS_GetCommandLineInt(syshandle, "show_physics", 0);
+
+			phy_env = B3DPhysicsEnvironment::Create(blenderscene, visualizePhysics);
+			physics_engine = UseBox3D;
+			break;
+		}
 	default:
 	case WOPHY_NONE:
 		{

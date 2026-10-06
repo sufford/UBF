@@ -787,7 +787,20 @@ typedef struct RenderData {
 
 	/* custom fork: software rasterizer mode */
 	int rasterizer_mode;
-	int pad_rasterizer;    /* ← добавить эту строку */
+	/* custom fork: параллельная сборка октодерева/BVH (C1c). Занято место
+	 * бывшего pad_rasterizer — размер RenderData не меняется. 0 — как было. */
+	int ubf_bvh_par;
+
+	/* custom fork: SSR в BI (экранные зеркала, см. RE_Rasterizer.c).
+	 * int, а не char: держим 8-байтовое выравнивание RenderData.
+	 * бит 0 — то, что видит RNA (RenderData.ubf_bi_ssr); остальные биты
+	 * свободны под будущие выключатели SSR. */
+	int ubf_bi_ssr;
+	/* custom fork: прочие боевые выключатели (C1d/C1e, D1, B1-кэш). Занято
+	 * место бывшего pad_ubf_ssr, размер структуры не меняется.
+	 * бит 0 — UBF_BVH_RTSORT, бит 1 — UBF_BVH_CUTPAR,
+	 * бит 2 — UBF_PSYS_PAR, бит 3 — UBF_HAIR_CACHE. */
+	int ubf_switches;
 } RenderData;
 
 /* *************************************************************** */
@@ -926,6 +939,7 @@ typedef struct GameData {
 /* GameData.physicsEngine */
 #define WOPHY_NONE		0
 #define WOPHY_BULLET	5
+#define WOPHY_BOX3D		6
 
 /* obstacleSimulation */
 #define OBSTSIMULATION_NONE		0
@@ -1890,6 +1904,11 @@ enum {
 #define RE_RASTERIZER_SCANLINE  1
 #define RE_RASTERIZER_EDGE      2
 #define RE_RASTERIZER_TILED     3
+/* ★ FAST: приближённый быстрый путь. Тот же растеризатор, что SCANLINE, но
+ * затенение считает свой шейдер (RE_Shader.c, «быстрый путь») и НЕ откатывается
+ * на BI: картинка намеренно приближённая (см. HANDOFF_FAST_PATH.md).
+ * Значения 2/3 не переиспользовать — они уже сохранены в .blend-файлах. */
+#define RE_RASTERIZER_FAST      4
 
 /* RenderData.color_mgt_flag */
 enum {

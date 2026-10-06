@@ -2098,7 +2098,31 @@ void zbuffer_solid(RenderPart *pa, RenderLayer *rl, void(*fillfunc)(RenderPart *
 	zbuf_make_winmat(&R, winmat);
 
 	samples= (R.osa? R.osa: 1);
-	samples= MIN2(4, samples-pa->sample);
+	/* ★ UBF_PROGRESSIVE: в пределах прохода растеризуем только его сэмплы
+	 * (конец диапазона задаёт pipeline.c перед вызовом плиточного прохода). */
+	{
+		extern int R_prog_pass_start, R_prog_pass_end;
+		if (R_prog_pass_end >= 0 && R_prog_pass_end < samples)
+			samples= R_prog_pass_end;
+	}
+	/* ★ UBF_OSA_CHUNK: та же гранулярность порции сэмплов, что и в цикле
+	 * zbufshadeDA_tile (rendercore.c). Значение читается здесь независимо,
+	 * чтобы не тащить общий глобал через DNA; по умолчанию 4. */
+	{
+		static int osa_chunk= 0;
+		if (osa_chunk == 0) {
+			const char *ce= getenv("UBF_OSA_CHUNK");
+			osa_chunk= ce ? atoi(ce) : 4;
+			if (osa_chunk < 1) osa_chunk= 1;
+			if (osa_chunk > 4) osa_chunk= 4;
+		}
+		samples= MIN2(osa_chunk, samples-pa->sample);
+
+		/* ★ диагностика проходов: сколько сэмплов реально растеризуется */
+		if (getenv("UBF_OSA_PASSES"))
+			printf("PROG solid part=(%d,%d) pa->sample=%d samples=%d chunk=%d\n",
+			       pa->disprect.xmin, pa->disprect.ymin, pa->sample, samples, osa_chunk);
+	}
 
 	for (zsample=0; zsample<samples; zsample++) {
 		zspan= &zspans[zsample];
@@ -2313,6 +2337,14 @@ void zbuffer_solid(RenderPart *pa, RenderLayer *rl, void(*fillfunc)(RenderPart *
 	}
 
 	RE_prof_glob_span(RE_PROF_BI_RASTER, t_bs0);   /* ★ PROF */
+
+	/* ★ PROF (C1g): разбор аномалии «bi_raster в MT вдвое больше, чем в T1».
+	 * Печатаем КАЖДЫЙ вызов: сколько частей, какого размера и сколько стоит каждая.
+	 * Считается только под UBF_PROF, на рендер не влияет. */
+	if (RE_prof_active()) {
+		printf("[PROF] zbuffer_solid: rect=%dx%d samples=%d dt=%.4f s\n",
+		       pa->rectx, pa->recty, samples, RE_prof_tick() - t_bs0);
+	}
 }
 
 void zbuffer_shadow(Render *re, float winmat[4][4], LampRen *lar, int *rectz, int size, float jitx, float jity)
@@ -2923,6 +2955,28 @@ static int zbuffer_abuf_render(RenderPart *pa, APixstr *APixbuf, APixstrand *APi
 	else
 		jit= NULL;
 
+	/* ★ UBF_OSA_PASSES: этот путь (Ztransp/strand) вызывается НА КАЖДЫЙ
+	 * проход плиточного процессора, а внутри берёт полный набор сэмплов
+	 * (`samples= R.osa` выше). Из-за этого весь вклад прозрачности считался
+	 * заново в каждом проходе: 2 прохода -> двойной вклад, 8 -> восьмикратный.
+	 * Подчиняем путь диапазону прохода. Цикл внутри `zbuffer_abuf`/
+	 * `zbuffer_strands_abuf` идёт от sample=0 и берёт jit[sample], поэтому
+	 * достаточно СДВИНУТЬ указатель на таблицу джиттера на начало прохода и
+	 * укоротить порцию до его длины — тогда будут ровно абсолютные сэмплы
+	 * этого прохода. */
+	{
+		extern int R_prog_pass_start, R_prog_pass_end;
+
+		if (R_prog_pass_end >= 0 && jit) {
+			int start= R_prog_pass_start;
+			int end= (R_prog_pass_end < samples) ? R_prog_pass_end : samples;
+
+			if (start > end) start= end;
+			jit += start;
+			samples= end - start;
+		}
+	}
+
 	zbuf_make_winmat(&R, winmat);
 
 	if (rl->layflag & SCE_LAY_ZTRA)
@@ -3024,6 +3078,19 @@ static void merge_transp_passes(RenderLayer *rl, ShadeResult *shr)
 	RenderPass *rpass;
 	float weight= 1.0f/((float)R.osa);
 	int delta= sizeof(ShadeResult)/4;
+	/* ★ UBF_OSA_PASSES: усредняем только сэмплы ТЕКУЩЕГО прохода, а вес
+	 * оставляем 1/R.osa. Тогда сумма проходов даёт полное среднее — тогда как
+	 * без этой правки функция каждый раз суммировала весь массив из R.osa
+	 * сэмплов и делила на R.osa, и при дроблении в массив попадали сэмплы
+	 * разных проходов (ошибка накапливалась с каждым вызовом). */
+	extern int R_prog_pass_start, R_prog_pass_end;
+	int ps0= 0, ps1= R.osa;
+
+	if (R_prog_pass_end >= 0) {
+		ps0= R_prog_pass_start;
+		ps1= (R_prog_pass_end < R.osa) ? R_prog_pass_end : R.osa;
+		if (ps0 > ps1) ps0= ps1;
+	}
 
 	for (rpass= rl->passes.first; rpass; rpass= rpass->next) {
 		float *col = NULL;
@@ -3095,10 +3162,16 @@ static void merge_transp_passes(RenderLayer *rl, ShadeResult *shr)
 		}
 
 		if (col) {
-			const float *fp= col+delta;
+			const float *fp;
 			int samp;
 
-			for (samp= 1; samp<R.osa; samp++, fp+=delta) {
+			/* ★ UBF_OSA_PASSES: все ветки выше указывают в ShadeResult
+			 * сэмпла 0, а delta — шаг между сэмплами, поэтому сдвиг даёт то же
+			 * поле, но для сэмпла ps0. */
+			col += ps0 * delta;
+			fp = col + delta;
+
+			for (samp= ps0 + 1; samp < ps1; samp++, fp+=delta) {
 				col[0]+= fp[0];
 				if (pixsize>1) {
 					col[1]+= fp[1];
@@ -3254,6 +3327,30 @@ static void shade_tra_samples_fill(ShadeSample *ssamp, int x, int y, int z, int 
 	float xs, ys;
 
 	ssamp->tot= 0;
+
+	/* ★ UBF_SEED_TRA: путь Ztransp/strand затеняет здесь, но во всём zbuf.c
+	 * НЕТ ни одного `BLI_thread_srandom`, то есть сид ГСЧ не сбрасывается на
+	 * пиксель. Значит поток случайных чисел для этого пути продолжается с того
+	 * места, где его оставил поток, а это зависит от того, сколько прозрачных
+	 * сэмплов было затенено раньше — то есть от нарезки кадра. Проверка: сеем
+	 * ГСЧ по абсолютной координате пикселя так же, как это сделано для
+	 * основного пути в rendercore.c (там это дало падение расхождения нарезок
+	 * с 72.6% до 0.30%). По умолчанию выключатель ВЫКЛ, чтобы основной путь
+	 * остался бит-в-бит.
+	 *
+	 * ★ getenv кэшируется: вызов идёт на каждый затеняемый пиксель этого пути,
+	 * а getenv в UCRT берёт глобальный замок окружения (см. shadeoutput.c,
+	 * HANDOFF_SSR_BI_STEP1.md). */
+	{
+		static int seed_tra = -1;
+
+		if (seed_tra < 0)
+			seed_tra = getenv("UBF_SEED_TRA") ? 1 : 0;
+		if (seed_tra) {
+			extern void BLI_thread_srandom(int thread, int seed);
+			BLI_thread_srandom(shi->thread, y * R.winx + x);
+		}
+	}
 
 	shade_input_set_triangle(shi, obi, facenr, 1);
 
@@ -3718,10 +3815,28 @@ unsigned short *zbuffer_transp_shade(RenderPart *pa, RenderLayer *rl, float *pas
 						}
 					}
 					else {
+						/* ★ UBF_OSA_PASSES: samp_shr — массив на СТЕКЕ
+						 * (`ShadeResult samp_shr[16]`), и заполняется он только
+						 * сэмплами текущего прохода. Цикл же по всему R.osa
+						 * добавлял в буфер прохода ВСЕ записи, включая сэмплы
+						 * чужих проходов, где лежит мусор со стека — и делал это
+						 * на каждом вызове, поэтому ошибка росла с числом
+						 * дроблений. Ограничиваем обход сэмплами прохода.
+						 * Нормировку (sampalpha= 1/R.osa) НЕ меняем: тогда сумма
+						 * проходов даёт полное среднее. */
+						extern int R_prog_pass_start, R_prog_pass_end;
+						int a0= 0;
+						int a1= (R_prog_pass_end >= 0) ? MIN2(R_prog_pass_end, osa) : osa;
+
+						if (R_prog_pass_end >= 0) {
+							a0= R_prog_pass_start;
+							if (a0 > a1) a0= a1;
+						}
+
 						alpha= 0.0f;
 
 						/* note; cannot use pass[3] for alpha due to filtermask */
-						for (a=0; a<R.osa; a++) {
+						for (a= a0; a < a1; a++) {
 							add_filt_fmask(1<<a, samp_shr[a].combined, pass, rr->rectx);
 							alpha+= samp_shr[a].combined[3];
 						}

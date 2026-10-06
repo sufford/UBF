@@ -23,9 +23,12 @@
 
 
 #include <stddef.h>
+#include <stdlib.h>
 
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_particle_types.h"
+#include "DNA_scene_types.h"
 
 #include "BLI_utildefines.h"
 
@@ -86,6 +89,49 @@ static CustomDataMask requiredDataMask(Object *UNUSED(ob), ModifierData *md)
 {
 	ParticleSystemModifierData *psmd = (ParticleSystemModifierData *) md;
 	return psys_emitter_customdata_mask(psmd->psys);
+}
+
+/* ★ БЫСТРЫЙ ПУТЬ (rasterizer_mode = FAST): системы частиц не пересчитываются.
+ *
+ * Замер на боевой сцене: particle_system_update() стоит 1.48 с (Plane.084,
+ * 100000 волос) + 0.25 с (Plane.083, 50000 волос) НА КАЖДЫЙ КАДР. При этом в
+ * сетку результат не попадает: у Plane.084 после пересчёта всё те же 15 вершин
+ * и 12 граней — волосы живут в pathcache и нужны только отрисовке страндов
+ * (BI), а быстрый путь странды не рисует вообще (проверено: см. ниже).
+ *
+ * Контрольный опыт: снять два модификатора PARTICLE_SYSTEM на боевой сцене —
+ * кадр 3.530 с -> 1.357 с, картинка отличается на 1 пиксель из 76800
+ * (mean=0.0007). То есть быстрый путь платил 1.6 с за волосы, которых у него
+ * на картинке нет.
+ *
+ * Выключатель: UBF_FAST_PSYS=0 (вернуть пересчёт частиц).
+ * Битовый путь не затронут: там rasterizer_mode != FAST, поведение прежнее.
+ *
+ * Цена решения (честно): пока в режиме FAST не рисуются странды, это чистая
+ * экономия; когда быстрый путь научится рисовать волосы, этот пропуск надо
+ * будет снять вместе с отрисовкой. И ещё: hair dynamics в FAST-рендере не
+ * продвигается — на картинку не влияет (волос не видно), но помнить об этом
+ * надо, если рендер делить между BI и FAST.
+ *
+ * ПОЧЕМУ ТОЛЬКО ВОЛОСЫ (PART_HAIR): particle_system_update() двигает ЛЮБУЮ
+ * систему частиц, в том числе эмиттерные, а те дают видимую геометрию —
+ * инстансы объектов (ParticleSettings.dupli_object) и частицы как меш. Пропуск
+ * для них убрал бы геометрию из кадра. Волосы же в сетку не превращаются
+ * (замерено: 15 вершин), их результат живёт в pathcache и нужен только
+ * отрисовке страндов, которой у быстрого пути нет. */
+static bool fast_skip_psys_update(Scene *scene, ParticleSystem *psys)
+{
+	static int env = -1;
+
+	if (env < 0) {
+		const char *e = getenv("UBF_FAST_PSYS");
+		env = (e && e[0] == '0') ? 0 : 1;
+	}
+	if (!env) return false;
+	if (!scene || !psys || !psys->part) return false;
+	if (psys->part->type != PART_HAIR) return false;
+
+	return (scene->r.rasterizer_mode == RE_RASTERIZER_FAST);
 }
 
 /* saves the current emitter state for a particle system and calculates particles */
@@ -179,8 +225,11 @@ static void deformVerts(
 
 	if (!(ob->transflag & OB_NO_PSYS_UPDATE)) {
 		psmd->flag &= ~eParticleSystemFlag_psys_updated;
-		particle_system_update(G.main, md->scene, ob, psys, (flag & MOD_APPLY_RENDER) != 0);
-		psmd->flag |= eParticleSystemFlag_psys_updated;
+		/* ★ БЫСТРЫЙ ПУТЬ: см. fast_skip_psys_update() выше. */
+		if (!fast_skip_psys_update(md->scene, psys)) {
+			particle_system_update(G.main, md->scene, ob, psys, (flag & MOD_APPLY_RENDER) != 0);
+			psmd->flag |= eParticleSystemFlag_psys_updated;
+		}
 	}
 }
 

@@ -1032,6 +1032,14 @@ add_dependencies(blender makesdna)
 setup_blender_sorted_libs()
 target_link_libraries(blender ${BLENDER_SORTED_LIBS} bf_kxscript)
 
+# ★ UBF: bf_ubf_cuda собрана nvcc'ем как СТАТИЧЕСКАЯ библиотека и в общий список
+# BLENDER_SORTED_LIBS не попадает (сортировщик знает только свои имена), поэтому
+# линкуем её явно. Рантайм CUDA берём статический: тогда blender.exe не зависит
+# от cudart64_*.dll в PATH (иначе он просто не запустится там, где тулкита нет).
+if(WITH_UBF_CUDA)
+	target_link_libraries(blender bf_ubf_cuda ${CUDA_cudart_static_LIBRARY})
+endif()
+
 setup_liblinks(blender)
 
 # -----------------------------------------------------------------------------

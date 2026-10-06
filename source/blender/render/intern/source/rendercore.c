@@ -390,7 +390,29 @@ static void lamphalo_tile(RenderPart *pa, RenderLayer *rl)
 					ps= ps->next;
 				}
 
-				if (totsamp<R.osa) {
+				/* ★ диагностика дробления: один и тот же пиксель кадра во всех
+				 * конфигурациях. Показывает, сколько сэмплов пришло в этом
+				 * вызове (totsamp), какие биты маски (mask) и что уже лежит в
+				 * буфере прохода (pass0). Если сумма проходов не равна
+				 * однопроходному значению — видно и во сколько раз. */
+				if (getenv("UBF_OSA_PASSES") && x == 200 && y == 96) {
+					extern int R_prog_pass_start, R_prog_pass_end;
+					float *pf= RE_RenderLayerGetPass(rl, RE_PASSNAME_COMBINED, R.viewname) + od * 4;
+
+					printf("PROG px(200,96) range=[%d,%d) totsamp=%d mask=%d fac_last=%.4f pass0=%.6f\n",
+					       R_prog_pass_start, (R_prog_pass_end >= 0) ? R_prog_pass_end : R.osa,
+					       totsamp, mask, (float)count / (float)R.osa, pf[0]);
+				}
+
+				/* ★ UBF_OSA_PASSES: ветка компенсации «промахнувшихся» лучей
+				 * рассчитана на то, что `totsamp` — это все сэмплы пикселя за
+				 * кадр. При проходах в вызове всегда только часть сэмплов,
+				 * поэтому компенсация добавлялась В КАЖДОМ проходе (при порции
+				 * 4 — fac=0.5 каждый раз), хотя «недостающие» сэмплы просто
+				 * лежат в другом проходе. Ниже — проверочное отключение ветки на
+				 * прогрессивном пути, чтобы измерить её вклад в ошибку. */
+				extern int R_prog_pass_end;
+				if (totsamp<R.osa && R_prog_pass_end < 0) {
 					shi.co[2]= 0.0f;
 
 					col[0]= col[1]= col[2]= col[3]= 0.0f;
@@ -806,6 +828,56 @@ static void atm_tile(RenderPart *pa, RenderLayer *rl)
 	}
 }
 
+/* ★ SSR в BI: запись представителя пикселя в КАДРОВЫЙ G-буфер.
+ *
+ * Пишется одна величина на пиксель — ПЕРВАЯ группа PixStr (ssamp->shi[0]).
+ * При OSA у пикселя несколько геометрий (по сэмплам), а маршу нужен один
+ * представитель; это осознанный компромисс экранных методов, тот же, что в
+ * быстром пути (RE_Shader.c:shader_fast_samples).
+ *
+ * Зеркальные величины берутся у BI ДОСЛОВНО (rayshade.c:1521,1556):
+ *   do_mir = (mat->mode & MA_RAYMIRROR) && ray_mirror != 0 && depth <= ray_depth
+ *   i      = ray_mirror * fresnel_fac(view, vn, fresnel_mir_i, fresnel_mir)
+ *   mirrgb = shi->mirr / mirg / mirb
+ * Резолв кладёт их той же формулой, что BI в ray_trace():
+ *   combined = (1 - i) * flat + i * mirrgb * mircol
+ * Это и есть причина, по которой лучи зеркал BI при включённом UBF_BI_SSR НЕ
+ * пускаются: иначе отражение считалось бы дважды (лучи BI + экранный марш).
+ *
+ * depth резолв читает в ПРОИЗВОЛЬНЫХ точках луча, поэтому store() зовётся для
+ * каждого затенённого пикселя, включая незеркальные; дорогие pos/nrm/view сам
+ * store() пишет только при i > 0 (RE_Rasterizer.c).
+ *
+ * Выключатель UBF_BI_SSR (по умолчанию ВЫКЛ) и RE_shader_fast() — двойная
+ * защита: у быстрого пути свой выключатель и свой источник данных. */
+static void bi_ssr_store_pixel(ShadeSample *ssamp, int x, int y)
+{
+	ShadeInput *shi;
+	float mirc[3];
+	float i = 0.0f;
+
+	if (!RE_bi_ssr_enabled()) return;
+	if (RE_shader_fast()) return;
+	if (ssamp->tot <= 0) return;
+
+	shi = &ssamp->shi[0];
+	if (shi->mat == NULL) return;
+
+	if ((shi->mat->mode & MA_RAYMIRROR) && shi->ray_mirror != 0.0f &&
+	    (shi->depth <= shi->mat->ray_depth))
+	{
+		i = shi->ray_mirror * fresnel_fac(shi->view, shi->vn,
+		                                  shi->mat->fresnel_mir_i,
+		                                  shi->mat->fresnel_mir);
+	}
+
+	mirc[0] = shi->mirr;
+	mirc[1] = shi->mirg;
+	mirc[2] = shi->mirb;
+
+	RE_fast_frame_store(x, y, shi->co, shi->vn, shi->view, i, mirc);
+}
+
 static void shadeDA_tile(RenderPart *pa, RenderLayer *rl)
 {
 	RenderResult *rr= pa->result;
@@ -813,6 +885,30 @@ static void shadeDA_tile(RenderPart *pa, RenderLayer *rl)
 	intptr_t *rd, *rectdaps= pa->rectdaps;
 	int samp;
 	int x, y, seed, crop=0, offs=0, od;
+	/* ★ UBF_PROGRESSIVE (шаг 1, замер): сид случайных сэмплов (AO, тени, SSS)
+	 * обязан зависеть от АБСОЛЮТНОЙ координаты пикселя в кадре.
+	 *
+	 * Старый сид `pa->rectx*pa->disprect.ymin`, инкрементируемый по одному на
+	 * пиксель в порядке обхода, разворачивается в
+	 *     seed(X, Y) = rectx*Y + (X - xmin)
+	 * то есть он СОДЕРЖИТ ШИРИНУ ЧАСТИ (rectx). Один и тот же пиксель кадра
+	 * при разбиении 64x64, 256x256 и одной части получает РАЗНЫЙ поток
+	 * случайных чисел -> разные выборки лучей AO/теней -> другой цвет.
+	 *
+	 * Это ровно объясняет накопленные замеры:
+	 *   - без OSA части во всю ширину кадра: rectx == ширине кадра, сид
+	 *     вырождается в абсолютный (W*Y + X), поэтому 16 полос и одна часть
+	 *     побитово совпадали (P1);
+	 *   - при OSA плитки 64/256: rectx = 64/256, сид НЕ абсолютный, поэтому
+	 *     все три разбиения дают разные кадры (P2/P6);
+	 *   - разница симметрична (+-1 по ~70% кадра, знаковое среднее ~0,
+	 *     корреляция 0.9997) и сидит в ПЛОСКИХ областях, потому что это не
+	 *     кромки и не фильтр, а дрожание выборок освещения везде (P5/P9);
+	 *   - с BOX-фильтром (дельта, crop=0, без перекрытий и без слияния)
+	 *     разбиение продолжает менять кадр — фильтр тут ни при чём.
+	 *
+	 * Выключатель: без UBF_PROGRESSIVE поведение байт-в-байт прежнее. */
+	const int prog_seed = (getenv("UBF_PROGRESSIVE") != NULL);
 
 	if (R.test_break(R.tbh)) return;
 
@@ -847,11 +943,30 @@ static void shadeDA_tile(RenderPart *pa, RenderLayer *rl)
 		od= offs;
 
 		for (x=pa->disprect.xmin+crop; x<pa->disprect.xmax-crop; x++, rd++, od++) {
-			BLI_thread_srandom(pa->thread, seed++);
+			/* ★ UBF_PROGRESSIVE: абсолютная координата вместо layout части */
+			if (prog_seed)
+				BLI_thread_srandom(pa->thread, y * R.winx + x);
+			else
+				BLI_thread_srandom(pa->thread, seed++);
+
+			/* ★ ГИБРИД (шаг 5): ремонтный проход шейдит ТОЛЬКО пиксели, где
+			 * марш промахнулся (им нужен луч BI). У остальных в кадре уже
+			 * лежит готовое значение, и слияние части их не тронет. Сид ГСЧ
+			 * выше трогаем на каждом пикселе — так порядок draws у шейдимых
+			 * пикселей совпадает с первой волной. */
+			if (RE_bi_ssr_repair_pass()) {
+				if (RE_bi_ssr_repair_skip(x, y))
+					continue;
+				RE_bi_ssr_repair_note(1);
+			}
 
 			if (*rd) {
 				if (shade_samples(&ssamp, (PixStr *)(*rd), x, y)) {
 					RE_prof_count(RE_PROF_C_SHADE_SMP, ssamp.tot);   /* ★ PROF */
+
+					/* ★ SSR в BI: представитель пикселя в кадровый G-буфер.
+					 * Только для пути BI (UBF_BI_SSR, по умолчанию выкл). */
+					bi_ssr_store_pixel(&ssamp, x, y);
 
 					/* multisample buffers or filtered mask filling? */
 					if (pa->fullresult.first) {
@@ -1166,6 +1281,15 @@ static void make_pixelstructs(RenderPart *pa, ZSpan *zspan, int sample, void *da
 			edge_enhance_tile(pa, sdata->edgerect, zspan->rectz);
 }
 
+/* ★ UBF_PROGRESSIVE: диапазон сэмплов OSA текущего прохода.
+ * R_prog_pass_end < 0 означает «весь диапазон 0..R.osa», то есть штатный путь
+ * с одним прохождением; так значение по умолчанию ничего не меняет. */
+int R_prog_pass_start= 0;
+int R_prog_pass_end= -1;
+/* ★ UBF_OSA_PASSES: 1 — слияние результата части в кадр складывается с уже
+ * накопленным (прогрессивные проходы), 0 — штатная перезапись (memcpy). */
+int R_prog_accumulate= 0;
+
 /* main call for shading Delta Accum, for OSA */
 /* supposed to be fully threadable! */
 void zbufshadeDA_tile(RenderPart *pa)
@@ -1195,7 +1319,32 @@ void zbufshadeDA_tile(RenderPart *pa)
 				edgerect= MEM_callocN(sizeof(float)*pa->rectx*pa->recty, "rectedge");
 
 		/* always fill visibility */
-		for (pa->sample=0; pa->sample<R.osa; pa->sample+=4) {
+		/* ★ UBF_OSA_CHUNK: размер порции сэмплов OSA за один вызов
+		 * zbuffer_solid. Штатно 4 (так исторически устроен BI: видимость
+		 * копится порциями по 4, а shadeDA_tile затем затеняет все накопленные
+		 * сэмплы сразу). Уменьшение порции до 1 проверяет, что накопление
+		 * видимости и пиксельструктур по сэмплам корректно при любой
+		 * гранулярности — это фундамент проходов progressive refine, где
+		 * проход k добавляет ровно свои сэмплы. По умолчанию 4, старый путь
+		 * не меняется. */
+		const char *chunke= getenv("UBF_OSA_CHUNK");
+		int chunk= chunke ? atoi(chunke) : 4;
+
+		if (chunk < 1) chunk= 1;
+		if (chunk > 4) chunk= 4;
+
+		int s0= R_prog_pass_start;
+		int s1= (R_prog_pass_end >= 0) ? R_prog_pass_end : R.osa;
+
+		if (s1 > R.osa) s1= R.osa;
+
+		/* ★ диагностика проходов: что именно затеняет эта часть */
+		if (getenv("UBF_OSA_PASSES"))
+			printf("PROG shadeDA part=(%d,%d,%d,%d) range=[%d,%d) osa=%d\n",
+			       pa->disprect.xmin, pa->disprect.ymin, pa->disprect.xmax, pa->disprect.ymax,
+			       s0, s1, R.osa);
+
+		for (pa->sample= s0; pa->sample < s1; pa->sample+=chunk) {
 			ZbufSolidData sdata;
 
 			sdata.rl= rl;
@@ -1244,6 +1393,7 @@ void zbufshadeDA_tile(RenderPart *pa)
 						solidmask= make_solid_mask(pa);
 
 					if (ztramask && solidmask) {
+						extern int R_prog_pass_start, R_prog_pass_end;
 						unsigned short *sps= solidmask, *spz= ztramask;
 						unsigned short fullmask= (1<<R.osa)-1;
 						float *fcol= rect;
@@ -1251,7 +1401,17 @@ void zbufshadeDA_tile(RenderPart *pa)
 						int x;
 
 						for (x=pa->rectx*pa->recty; x>0; x--, acol+=4, fcol+=4, sps++, spz++) {
-							if (*sps == fullmask)
+							/* ★ UBF_OSA_PASSES: при сборке кадра по проходам
+							 * маска пикселя содержит только сэмплы ТЕКУЩЕГО
+							 * прохода, поэтому пиксель, полностью солидный в
+							 * целом кадре, здесь получит неполную маску.
+							 * Тогда ветка `*sps == fullmask` (другой код, другое
+							 * округление) выбиралась бы по-разному в зависимости
+							 * от нарезки на проходы. Пока проходы активны, всегда
+							 * идём по маскированной ветке. При выключенных
+							 * проходах (`R_prog_pass_end < 0`) условие прежнее,
+							 * поэтому основной путь остаётся бит-в-бит. */
+							if (R_prog_pass_end < 0 && *sps == fullmask)
 								addAlphaOverFloat(fcol, acol);
 							else
 								addAlphaOverFloatMask(fcol, acol, *sps, *spz);
@@ -1390,6 +1550,11 @@ void zbufshade_tile(RenderPart *pa)
 				const float *fcol = rect;
 				const int *ro= pa->recto, *rp= pa->rectp, *rz= pa->rectz;
 				int x, y, offs=0, seed;
+				/* ★ UBF_PROGRESSIVE: тот же абсолютный сид, что и в OSA-пути
+				 * (см. комментарий в shadeDA_tile). В полосе во всю ширину
+				 * кадра старый сид уже вырождался в абсолютный, поэтому здесь
+				 * это no-op; флаг нужен для случаев узкой части. */
+				const int prog_seed = (getenv("UBF_PROGRESSIVE") != NULL);
 				/* ★ ШАГ B3: свой шейдер включён */
 				const int shader_on = RE_shader_enabled();
 				/* ★ ШАГ B3: покрытие своего шейдера на этой части/слое.
@@ -1413,7 +1578,18 @@ void zbufshade_tile(RenderPart *pa)
 				for (y=pa->disprect.ymin; y<pa->disprect.ymax; y++, rr->renrect.ymax++) {
 					for (x=pa->disprect.xmin; x<pa->disprect.xmax; x++, ro++, rz++, rp++, fcol+=4, offs++) {
 						/* per pixel fixed seed */
-						BLI_thread_srandom(pa->thread, seed++);
+						if (prog_seed)
+							BLI_thread_srandom(pa->thread, y * R.winx + x);
+						else
+							BLI_thread_srandom(pa->thread, seed++);
+
+						/* ★ ГИБРИД (шаг 5): см. shadeDA_tile — ремонтный проход
+						 * шейдит только помеченные пиксели (промахи марша). */
+						if (RE_bi_ssr_repair_pass()) {
+							if (RE_bi_ssr_repair_skip(x, y))
+								continue;
+							RE_bi_ssr_repair_note(1);
+						}
 
 						if (*rp) {
 							ps.obi = *ro;
@@ -1448,12 +1624,15 @@ void zbufshade_tile(RenderPart *pa)
 								}
 
 								RE_prof_glob_span(RE_PROF_SHADE_OURS, t_ours0);   /* ★ PROF */
+								bi_ssr_store_pixel(&ssamp, x, y);
 							}
 							else {
 								double t_bi0 = RE_prof_tick();   /* ★ PROF */
 								int shaded = shade_samples(&ssamp, &ps, x, y);
 
 								RE_prof_glob_span(RE_PROF_SHADE_BI, t_bi0);      /* ★ PROF */
+
+								bi_ssr_store_pixel(&ssamp, x, y);
 
 								if (shaded)
 									add_passes(rl, offs, ssamp.shi, ssamp.shr);
@@ -1705,6 +1884,8 @@ void zbufshade_sss_tile(RenderPart *pa)
 	float (*co)[3], (*color)[3], *area, *fcol;
 	int x, y, seed, quad, totpoint;
 	const bool display = (re->r.scemode & (R_BUTS_PREVIEW | R_VIEWPORT_PREVIEW)) == 0;
+	/* ★ UBF_PROGRESSIVE: абсолютный сид и в SSS-проходе (см. shadeDA_tile) */
+	const int prog_seed = (getenv("UBF_PROGRESSIVE") != NULL);
 	int *ro, *rz, *rp, *rbo, *rbz, *rbp, lay;
 #if 0
 	PixStr *ps;
@@ -1791,7 +1972,10 @@ void zbufshade_sss_tile(RenderPart *pa)
 	for (y=pa->disprect.ymin; y<pa->disprect.ymax; y++, rr->renrect.ymax++) {
 		for (x=pa->disprect.xmin; x<pa->disprect.xmax; x++, fcol+=4) {
 			/* per pixel fixed seed */
-			BLI_thread_srandom(pa->thread, seed++);
+			if (prog_seed)
+				BLI_thread_srandom(pa->thread, y * R.winx + x);
+			else
+				BLI_thread_srandom(pa->thread, seed++);
 
 #if 0
 			if (rs) {

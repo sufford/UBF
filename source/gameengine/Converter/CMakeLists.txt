@@ -33,6 +33,7 @@ set(INC
 	../Network
 	../Network/LoopBackNetwork
 	../Physics/Bullet
+	../Physics/Box3D
 	../Physics/Dummy
 	../Physics/common
 	../Rasterizer
@@ -59,6 +60,7 @@ set(INC_SYS
 	${EIGEN3_INCLUDE_DIRS}
 	${PTHREADS_INCLUDE_DIRS}
 	${BOOST_INCLUDE_DIR}
+	${CMAKE_SOURCE_DIR}/intern/rigidbody_box3d/include
 )
 
 set(SRC

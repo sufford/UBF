@@ -55,6 +55,7 @@
 #include "rayobject.h"
 #include "raycounter.h"
 #include "RE_Prof.h"   /* ★ PROF */
+#include "RE_Rasterizer.h"   /* ★ SSR в BI: RE_bi_ssr_enabled() */
 
 #define RAY_TRA		1
 #define RAY_INSIDE	2
@@ -303,10 +304,16 @@ static void makeraytree_single(Render *re)
 	RayFace *face = NULL;
 	VlakPrimitive *vlakprimitive = NULL;
 	int faces = 0, special = 0;
+	/* ★ PROF: разложение сборки дерева — подсчёт, заливка лиц, вставка, сборка */
+	double t_count = 0.0, t_fill = 0.0, t_add = 0.0, t_done = 0.0, t0;
+	int ninst = 0;
 
+	t0 = RE_prof_tick();                          /* ★ PROF */
 	for (obi = re->instancetable.first; obi; obi = obi->next) {
 		if (is_raytraceable(re, obi)) {
 			ObjectRen *obr = obi->obr;
+
+			ninst++;                                  /* ★ PROF */
 
 			if (has_special_rayobject(re, obi)) {
 				special++;
@@ -322,6 +329,7 @@ static void makeraytree_single(Render *re)
 			}
 		}
 	}
+	t_count = RE_prof_tick() - t0;                /* ★ PROF */
 
 	if (faces + special == 0) {
 		re->raytree = RE_rayobject_empty_create();
@@ -344,13 +352,20 @@ static void makeraytree_single(Render *re)
 			break;
 
 		if (has_special_rayobject(re, obi)) {
-			RayObject *obj = makeraytree_object(re, obi);
+			RayObject *obj;
+
+			t0 = RE_prof_tick();                  /* ★ PROF */
+			obj = makeraytree_object(re, obi);
+			t_fill += RE_prof_tick() - t0;        /* ★ PROF */
 
 			if (test_break(re))
 				break;
 
-			if (obj)
+			if (obj) {
+				t0 = RE_prof_tick();              /* ★ PROF */
 				RE_rayobject_add(re->raytree, obj);
+				t_add += RE_prof_tick() - t0;     /* ★ PROF */
+			}
 		}
 		else {
 			int v;
@@ -364,11 +379,19 @@ static void makeraytree_single(Render *re)
 				VlakRen *vlr = obr->vlaknodes[v>>8].vlak + (v&255);
 				if (is_raytraceable_vlr(re, vlr)) {
 					if ((re->r.raytrace_options & R_RAYTRACE_USE_LOCAL_COORDS)) {
-						RayObject *obj = RE_vlakprimitive_from_vlak( vlakprimitive, obi, vlr );
+						RayObject *obj;
+
+						t0 = RE_prof_tick();          /* ★ PROF */
+						obj = RE_vlakprimitive_from_vlak( vlakprimitive, obi, vlr );
+						t_fill += RE_prof_tick() - t0;   /* ★ PROF */
+
+						t0 = RE_prof_tick();          /* ★ PROF */
 						RE_rayobject_add(raytree, obj);
+						t_add += RE_prof_tick() - t0;    /* ★ PROF */
 						vlakprimitive++;
 					}
 					else {
+						t0 = RE_prof_tick();          /* ★ PROF */
 						RE_rayface_from_vlak(face, obi, vlr);
 						if ((obi->flag & R_TRANSFORMED)) {
 							mul_m4_v3(obi->mat, face->v1);
@@ -377,8 +400,11 @@ static void makeraytree_single(Render *re)
 							if (RE_rayface_isQuad(face))
 								mul_m4_v3(obi->mat, face->v4);
 						}
+						t_fill += RE_prof_tick() - t0;   /* ★ PROF */
 
+						t0 = RE_prof_tick();          /* ★ PROF */
 						RE_rayobject_add(raytree, RE_rayobject_unalignRayFace(face));
+						t_add += RE_prof_tick() - t0;    /* ★ PROF */
 						face++;
 					}
 				}
@@ -390,7 +416,15 @@ static void makeraytree_single(Render *re)
 		re->i.infostr = IFACE_("Raytree.. building");
 		re->stats_draw(re->sdh, &re->i);
 
+		t0 = RE_prof_tick();                      /* ★ PROF */
 		RE_rayobject_done(raytree);
+		t_done = RE_prof_tick() - t0;             /* ★ PROF */
+
+		if (RE_prof_active()) {                   /* ★ PROF */
+			printf("[PROF] ИТОГ октодерево: инстансов=%d граней=%d спец=%d | подсчёт=%.4f s "
+			       "заливка=%.4f s вставка=%.4f s сборка(done)=%.4f s\n",
+			       ninst, faces, special, t_count, t_fill, t_add, t_done);
+		}
 	}
 }
 
@@ -399,6 +433,15 @@ void makeraytree(Render *re)
 	float min[3], max[3], sub[3];
 	int i;
 	double t_rt0 = RE_prof_tick();   /* ★ PROF */
+
+	/* ★ UBF: кладём сборщикам BVH значения из .blend — у них нет доступа к
+	 * сцене, а переменная окружения всё равно важнее файла (см.
+	 * RE_rayobject_ubf_bvh_set в rayobject_internal.h). ubf_bvh_par == 0 в файле
+	 * означает «как раньше» (32 куска), поэтому файлы, сохранённые до появления
+	 * поля, ведут себя как прежде. Бит в ubf_switches означает ВЫКЛЮЧЕНО. */
+	RE_rayobject_ubf_bvh_set(re->r.ubf_bvh_par,
+	                         (re->r.ubf_switches & 1) == 0,
+	                         (re->r.ubf_switches & 2) == 0);
 
 	re->i.infostr = IFACE_("Raytree.. preparing");
 	re->stats_draw(re->sdh, &re->i);
@@ -1520,6 +1563,17 @@ void ray_trace(ShadeInput *shi, ShadeResult *shr)
 	do_tra = ((shi->mode & MA_TRANSP) && (shi->mode & MA_RAYTRANSP) && shr->alpha != 1.0f && (shi->depth <= shi->mat->ray_depth_tra));
 	do_mir = ((shi->mat->mode & MA_RAYMIRROR) && shi->ray_mirror != 0.0f && (shi->depth <= shi->mat->ray_depth));
 
+	/* ★ SSR в BI (UBF_BI_SSR, по умолчанию ВЫКЛ): отражение собирает экранный
+	 * марш в резолве кадрового G-буфера после всех частей, поэтому луч зеркала
+	 * здесь не пускается. Без этого отражение считалось бы дважды: лучами BI
+	 * (они пишут результат в Combined) и экранным маршем поверх него.
+	 * Прозрачность (do_tra) НЕ трогается — она остаётся лучевой.
+	 *
+	 * ★ ГИБРИД (шаг 5): в РЕМОНТНОМ проходе луч как раз и нужен — это пиксели,
+	 * где марш промахнулся и экранного цвета для отражения нет. */
+	if (RE_bi_ssr_enabled() && !RE_bi_ssr_repair_pass())
+		do_mir = 0;
+
 	/* raytrace mirror and refract like to separate the spec color */
 	if (shi->combinedflag & SCE_PASS_SPEC)
 		sub_v3_v3v3(diff, shr->combined, shr->spec);
@@ -2299,7 +2353,11 @@ static void ray_shadow_qmc(ShadeInput *shi, LampRen *lar, const float lampco[3],
 			colsq[2] += col[2]*col[2];
 		}
 		else {
-			if ( RE_rayobject_raycast(R.raytree, isec) ) fac+= 1.0f;
+			RE_prof_count(RE_PROF_C_SHADOW_RAYS, 1);   /* ★ PROF B1 */
+			if ( RE_rayobject_raycast(R.raytree, isec) ) {
+				RE_prof_count(RE_PROF_C_SHADOW_HITS, 1);
+				fac+= 1.0f;
+			}
 		}
 
 		samples++;
@@ -2403,7 +2461,14 @@ static void ray_shadow_jitter(ShadeInput *shi, LampRen *lar, const float lampco[
 			shadfac[2] += col[2];
 			shadfac[3] += col[3];
 		}
-		else if ( RE_rayobject_raycast(R.raytree, isec) ) fac+= 1.0f;
+		else {
+			/* ★ PROF B1: считаем сам факт луча, а не только попадание */
+			RE_prof_count(RE_PROF_C_SHADOW_RAYS, 1);
+			if (RE_rayobject_raycast(R.raytree, isec)) {
+				RE_prof_count(RE_PROF_C_SHADOW_HITS, 1);
+				fac+= 1.0f;
+			}
+		}
 
 		div+= 1.0f;
 		jitlamp+= 2;
@@ -2428,6 +2493,9 @@ void ray_shadow(ShadeInput *shi, LampRen *lar, float shadfac[4])
 {
 	Isect isec;
 	float lampco[3];
+	double t_rs0 = RE_prof_tick();   /* ★ PROF B1: время теней ламп */
+
+	RE_prof_count(RE_PROF_C_SHADOW_LAMPS, 1);   /* ★ PROF B1 */
 
 	/* setup isec */
 	RE_RC_INIT(isec, *shi);
@@ -2497,8 +2565,14 @@ void ray_shadow(ShadeInput *shi, LampRen *lar, float shadfac[4])
 				ray_trace_shadow_tra(&isec, shi, DEPTH_SHADOW_TRA, 0, col);
 				copy_v4_v4(shadfac, col);
 			}
-			else if (RE_rayobject_raycast(R.raytree, &isec))
-				shadfac[3]= 0.0f;
+			else {
+				/* ★ PROF B1: одиночный теневой луч (ray_totsamp<2) */
+				RE_prof_count(RE_PROF_C_SHADOW_RAYS, 1);
+				if (RE_rayobject_raycast(R.raytree, &isec)) {
+					RE_prof_count(RE_PROF_C_SHADOW_HITS, 1);
+					shadfac[3]= 0.0f;
+				}
+			}
 		}
 		else {
 			ray_shadow_jitter(shi, lar, lampco, shadfac, &isec);
@@ -2510,4 +2584,5 @@ void ray_shadow(ShadeInput *shi, LampRen *lar, float shadfac[4])
 		lar->last_hit[shi->thread] = isec.last_hit;
 	}
 
+	RE_prof_glob_span(RE_PROF_RAY_SHADOW, t_rs0);   /* ★ PROF B1 */
 }

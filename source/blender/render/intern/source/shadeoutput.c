@@ -1143,12 +1143,32 @@ static void indirect_lighting_apply(ShadeInput *shi, ShadeResult *shr)
 	shr->combined[2] += shi->indirect[2]*shi->b*shi->refl*f;
 }
 
+/* ★ UBF_SAMPLENR_CONST: значение окружения КЭШИРУЕТСЯ. Раньше getenv() стоял
+ * прямо в условии ниже, а `lamp_get_shadow` вызывается на КАЖДУЮ лампу на
+ * КАЖДЫЙ сэмпл (в боевой сцене 71 лампа). getenv в UCRT берёт глобальный
+ * замок окружения, поэтому при 16 потоках рендер BI терял масштабирование:
+ * замер 400x192 OSA=8 — 37.9 с против 14.6 с у чистого HEAD, часть кадра
+ * 12 с против 0.9 с. См. HANDOFF_SSR_BI_STEP1.md. */
+static int samplenr_const(void)
+{
+	static int state = -1;
+
+	if (state < 0)
+		state = getenv("UBF_SAMPLENR_CONST") ? 1 : 0;
+	return state;
+}
+
 /* result written in shadfac */
 void lamp_get_shadow(LampRen *lar, ShadeInput *shi, float inp, float shadfac[4], int do_real)
 {
 	LampShadowSubSample *lss= &(lar->shadsamp[shi->thread].s[shi->sample]);
 
-	if (do_real || lss->samplenr!=shi->samplenr) {
+	/* ★ UBF_SAMPLENR_CONST: счётчик `samplenr` — бегущий номер на поток, а
+	 * служит он ключом этого кэша теней. Фаза счётчика зависит от нарезки
+	 * кадра, поэтому при разных тайлах кэш может переиспользовать тень от
+	 * другого пикселя. Под выключателем считаем тень всегда (do_real),
+	 * чтобы измерить вклад этой зависимости в расхождение нарезок. */
+	if (do_real || samplenr_const() || lss->samplenr!=shi->samplenr) {
 
 		shadfac[0]= shadfac[1]= shadfac[2]= shadfac[3]= 1.0f;
 

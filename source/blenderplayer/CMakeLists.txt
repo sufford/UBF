@@ -109,6 +109,7 @@ endif()
 		ge_converter
 		ge_logic_ketsji
 		ge_phys_bullet
+		ge_phys_box3d
 		ge_phys_dummy
 		ge_logic
 		ge_rasterizer

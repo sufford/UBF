@@ -2956,7 +2956,14 @@ static void psys_update_path_cache(ParticleSimulationData *sim, float cfra, cons
 	}
 
 	if (!skip) {
+		double ubf_t_pc = PIL_check_seconds_timer();   /* ★ PROF */
+		double ubf_dt_pc;
+
 		psys_cache_paths(sim, cfra, use_render_params);
+		ubf_dt_pc = PIL_check_seconds_timer() - ubf_t_pc;
+		if (getenv("UBF_PROF") && ubf_dt_pc > 0.05)
+			printf("[PROF-PSYS] %s: psys_cache_paths=%.4f s (частиц=%d)\n",
+			       psys->part->id.name + 2, ubf_dt_pc, psys->totpart);
 
 		/* for render, child particle paths are computed on the fly */
 		if (part->childtype) {
@@ -2965,8 +2972,16 @@ static void psys_update_path_cache(ParticleSimulationData *sim, float cfra, cons
 			else if (psys->part->type == PART_HAIR && (psys->flag & PSYS_HAIR_DONE)==0)
 				skip = 1;
 
-			if (!skip)
+			if (!skip) {
+				double ubf_t_ch = PIL_check_seconds_timer();   /* ★ PROF */
+				double ubf_dt_ch;
+
 				psys_cache_child_paths(sim, cfra, 0, use_render_params);
+				ubf_dt_ch = PIL_check_seconds_timer() - ubf_t_ch;
+				if (getenv("UBF_PROF") && ubf_dt_ch > 0.05)
+					printf("[PROF-PSYS] %s: psys_cache_child_paths=%.4f s (детей=%d)\n",
+					       psys->part->id.name + 2, ubf_dt_ch, psys->totchild);
+			}
 		}
 	}
 	else if (psys->pathcache)
@@ -4250,38 +4265,79 @@ void particle_system_update(Main *bmain, Scene *scene, Object *ob, ParticleSyste
 			}
 			/* (re-)create hair */
 			else if (hair_needs_recalc(psys)) {
-				float hcfra=0.0f;
-				int i, recalc = psys->recalc;
-
-				free_hair(ob, psys, 0);
-
-				if (psys->edit && psys->free_edit) {
-					psys->free_edit(psys->edit);
-					psys->edit = NULL;
-					psys->free_edit = NULL;
+				if (ubf_hair_cache_can_skip(scene, ob, psys, cfra)) {
+					/* ★ UBF_HAIR_CACHE: входы те же, что у последнего полного пересчёта,
+					 * состояние волос уже правильное — шаги роста не считаем. Кадр в
+					 * записи двигаем: состояние теперь отвечает и текущему кадру. */
+					psys->flag |= PSYS_HAIR_DONE;
+					ubf_hair_cache_remember(ob, psys, cfra);
+					if (getenv("UBF_PROF"))
+						printf("[PROF-PSYS] %s: пересчёт волос пропущен (кэш, кадр=%.0f)\n",
+						       ob->id.name + 2, cfra);
 				}
+				else {
+					float hcfra=0.0f;
+					int i, recalc = psys->recalc;
 
-				/* first step is negative so particles get killed and reset */
-				psys->cfra= 1.0f;
+					free_hair(ob, psys, 0);
 
-				for (i=0; i<=part->hair_step; i++) {
-					hcfra=100.0f*(float)i/(float)psys->part->hair_step;
-					if ((part->flag & PART_HAIR_REGROW)==0)
-						BKE_animsys_evaluate_animdata(scene, &part->id, part->adt, hcfra, ADT_RECALC_ANIM);
-					system_step(&sim, hcfra, use_render_params);
-					psys->cfra = hcfra;
-					psys->recalc = 0;
-					save_hair(&sim, hcfra);
+					if (psys->edit && psys->free_edit) {
+						psys->free_edit(psys->edit);
+						psys->edit = NULL;
+						psys->free_edit = NULL;
+					}
+
+					/* first step is negative so particles get killed and reset */
+					psys->cfra= 1.0f;
+
+					{
+						double ubf_t_rec = PIL_check_seconds_timer();   /* ★ PROF */
+						double ubf_dt_rec, ubf_t0;
+						double ubf_acc_anim = 0.0, ubf_acc_step = 0.0, ubf_acc_save = 0.0;
+
+						for (i=0; i<=part->hair_step; i++) {
+							hcfra=100.0f*(float)i/(float)psys->part->hair_step;
+							if ((part->flag & PART_HAIR_REGROW)==0) {
+								ubf_t0 = PIL_check_seconds_timer();
+								BKE_animsys_evaluate_animdata(scene, &part->id, part->adt, hcfra, ADT_RECALC_ANIM);
+								ubf_acc_anim += PIL_check_seconds_timer() - ubf_t0;
+							}
+							ubf_t0 = PIL_check_seconds_timer();
+							system_step(&sim, hcfra, use_render_params);
+							ubf_acc_step += PIL_check_seconds_timer() - ubf_t0;
+							psys->cfra = hcfra;
+							psys->recalc = 0;
+							ubf_t0 = PIL_check_seconds_timer();
+							save_hair(&sim, hcfra);
+							ubf_acc_save += PIL_check_seconds_timer() - ubf_t0;
+						}
+
+						ubf_dt_rec = PIL_check_seconds_timer() - ubf_t_rec;
+						if (getenv("UBF_PROF") && ubf_dt_rec > 0.05)
+							printf("[PROF-PSYS] %s: пересчёт волос (%d шагов)=%.4f s"
+							       " (анимация=%.4f system_step=%.4f save_hair=%.4f, частиц=%d)\n",
+							       ob->id.name + 2, (int)part->hair_step + 1, ubf_dt_rec,
+							       ubf_acc_anim, ubf_acc_step, ubf_acc_save, psys->totpart);
+					}
+
+					psys->flag |= PSYS_HAIR_DONE;
+					psys->recalc = recalc;
+					ubf_hair_cache_remember(ob, psys, cfra);   /* ★ UBF_HAIR_CACHE */
 				}
-
-				psys->flag |= PSYS_HAIR_DONE;
-				psys->recalc = recalc;
 			}
 			else if (psys->flag & PSYS_EDITED)
 				psys->flag |= PSYS_HAIR_DONE;
 
-			if (psys->flag & PSYS_HAIR_DONE)
+			if (psys->flag & PSYS_HAIR_DONE) {
+				double ubf_t_hair = PIL_check_seconds_timer();   /* ★ PROF */
+				double ubf_dt_hair;
+
 				hair_step(&sim, cfra, use_render_params);
+				ubf_dt_hair = PIL_check_seconds_timer() - ubf_t_hair;
+				if (getenv("UBF_PROF") && ubf_dt_hair > 0.05)
+					printf("[PROF-PSYS] %s: hair_step=%.4f s (частиц=%d детей=%d)\n",
+					       ob->id.name + 2, ubf_dt_hair, psys->totpart, psys->totchild);
+			}
 			break;
 		}
 		case PART_FLUID:

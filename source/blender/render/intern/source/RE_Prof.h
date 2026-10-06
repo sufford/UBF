@@ -13,9 +13,10 @@
  * СТОИМОСТЬ ПРИ ВЫКЛЮЧЕННОМ РЕЖИМЕ: ноль. Проверка окружения кэшируется в
  * статике, при UBF_PROF в окружении нет — ни один таймер не вызывается.
  *
- * ПОТОКИ: аккумуляторы — обычные глобалы, гонки не защищены. Замеры надо
- * снимать при UBF_T1=1 (один поток рендера), иначе RE_prof_part_begin один
- * раз предупредит, что цифры рваные.
+ * ПОТОКИ: измерения копятся в блоке на поток (ProfBlock), отчёт суммирует блоки,
+ * поэтому мерить можно и в несколько потоков. Раньше аккумуляторы были общими:
+ * числа рвались, а горячие счётчики били по одной кэш-линии из всех ядер — на
+ * aero4 (16 потоков) это стоило +49 s из 209 s кадра против 160.7 s без профиля.
  *
  * ВЛОЖЕННОСТЬ (критично для чтения отчёта):
  *     PART ⊃ { SPAN, SCENE_LOOP }
@@ -63,9 +64,15 @@ typedef enum RE_ProfSlot {
 	RE_PROF_RAYTRACE,      /* ray_trace() — зеркало и преломление */
 	RE_PROF_REFLECT,       /* из него: trace_reflect() */
 	RE_PROF_REFRACT,       /* из него: trace_refract() */
+	RE_PROF_RAY_SHADOW,    /* ray_shadow() — теневые лучи ламп (этап B1-замер) */
 	RE_PROF_RAYTREE,       /* build_raytree() — октодерево */
 	RE_PROF_SHADBUF,       /* создание shadow-буферов ламп */
 	RE_PROF_SCENE_PREP,    /* convertblender: сцена -> база рендера */
+	RE_PROF_SCENE_DEPS,    /* из него: BKE_scene_update_for_newframe (депграф) */
+	RE_PROF_SCENE_DB,      /* из него: database_init_objects (сцена -> VlakRen) */
+	RE_PROF_MESH_VERT,     /* из базы: копирование вершин (init_render_dm) */
+	RE_PROF_MESH_FACE,     /* из базы: цикл грани/материалы (init_render_dm) */
+	RE_PROF_MESH_DM,       /* из базы: mesh_create_derived_render (по объекту) */
 
 	RE_PROF_NUM
 } RE_ProfSlot;
@@ -76,8 +83,11 @@ typedef enum RE_ProfSlot {
 	 (slot) == RE_PROF_SHADE_BI || (slot) == RE_PROF_BI_RASTER || \
 	 (slot) == RE_PROF_BI_SHADE || (slot) == RE_PROF_RAYTRACE || \
 	 (slot) == RE_PROF_REFLECT || (slot) == RE_PROF_REFRACT || \
+	 (slot) == RE_PROF_RAY_SHADOW || \
 	 (slot) == RE_PROF_RAYTREE || (slot) == RE_PROF_SHADBUF || \
-	 (slot) == RE_PROF_SCENE_PREP)
+	 (slot) == RE_PROF_SCENE_PREP || (slot) == RE_PROF_SCENE_DEPS || \
+	 (slot) == RE_PROF_SCENE_DB || (slot) == RE_PROF_MESH_VERT || \
+	 (slot) == RE_PROF_MESH_FACE || (slot) == RE_PROF_MESH_DM)
 
 /* Счётчики — чтобы отличать «дорого потому что много работы» от
  * «дорого потому что работа плохая». */
@@ -106,6 +116,9 @@ typedef enum RE_ProfCounter {
 	RE_PROF_C_RAYCAST_MISS,    /* из них мимо (луч ушёл в пустоту) */
 	RE_PROF_C_SHADBUF,         /* построено теневых буферов */
 	RE_PROF_C_SHADE_SMP,       /* затенённых сэмплов (OSA) */
+	RE_PROF_C_SHADOW_LAMPS,    /* вызовов ray_shadow() = лампа x сэмпл */
+	RE_PROF_C_SHADOW_RAYS,     /* теневых лучей (raycast в теневых функциях) */
+	RE_PROF_C_SHADOW_HITS,     /* из них попали (луч в тени, обход короткий) */
 
 	RE_PROF_C_NUM
 } RE_ProfCounter;
@@ -128,6 +141,14 @@ void RE_prof_part_end(int xmin, int ymin, int rectx, int recty);
 void RE_prof_add(int slot, double dt);
 void RE_prof_add_global(int slot, double dt);
 void RE_prof_count(int counter, long n);
+
+/* ★ Счётчики кэша геометрии держим ОТДЕЛЬНО от prof_cacc: они считаются на
+ * подготовке сцены, то есть ДО частей, а RE_prof_part_begin() обнуляет cacc на
+ * старте каждой части — в общей куче эти числа просто терялись. */
+#define RE_PROF_DM_BUILD  0   /* построено DerivedMesh заново */
+#define RE_PROF_DM_REUSE  1   /* взято из кэша объекта */
+#define RE_PROF_DM_ALIVE  2   /* ob->derivedFinal был жив на входе */
+void RE_prof_count_dm(int what, long n);
 
 /* ★ PROF — предупреждение о многопоточности (зовётся из render_part). */
 void RE_prof_note_threads(int threads);

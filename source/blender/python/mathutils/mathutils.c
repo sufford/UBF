@@ -416,7 +416,10 @@ PyObject *mathutils_dynstr_to_py(struct DynStr *ds)
 /* Mathutils Callbacks */
 
 /* for mathutils internal use only, eventually should re-alloc but to start with we only have a few users */
-#define MATHUTILS_TOT_CB 17
+/* NOTE: the table keeps one free slot as a NULL sentinel for the scan loop in
+ * Mathutils_RegisterCallback().  The engine (bpy + bmesh + Freestyle + the game
+ * engine) currently registers 17 callbacks, so the table must hold 18. */
+#define MATHUTILS_TOT_CB 18
 static Mathutils_Callback *mathutils_callbacks[MATHUTILS_TOT_CB] = {NULL};
 
 unsigned char Mathutils_RegisterCallback(Mathutils_Callback *cb)

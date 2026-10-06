@@ -435,6 +435,11 @@ void reset_particle(struct ParticleSimulationData *sim, struct ParticleData *pa,
 
 float psys_get_current_display_percentage(struct ParticleSystem *psys);
 
+/* ★ UBF_HAIR_CACHE: см. particle.c — пропуск пересчёта волос при тех же входах */
+void ubf_hair_cache_invalidate(struct ParticleSystem *psys);
+int ubf_hair_cache_can_skip(struct Scene *scene, struct Object *ob, struct ParticleSystem *psys, float cfra);
+void ubf_hair_cache_remember(struct Object *ob, struct ParticleSystem *psys, float cfra);
+
 typedef struct ParticleRenderElem {
 	int curchild, totchild, reduce;
 	float lambda, t, scalemin, scalemax;

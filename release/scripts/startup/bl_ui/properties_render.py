@@ -199,6 +199,17 @@ class RENDER_PT_antialiasing(RenderButtonsPanel, Panel):
         col.prop(rd, "pixel_filter_type", text="")
         col.prop(rd, "filter_size", text="Size")
 
+        # custom fork: боевые выключатели скорости (UBF). Переменная окружения
+        # важнее этих галочек — так устроены стенды, приёмка и замеры.
+        col = layout.column(align=True)
+        col.active = True   # не гаснет вместе с анти-алиасингом
+        col.label("UBF: скорость рендера (важнее — переменная окружения)")
+        col.prop(rd, "ubf_bvh_par")
+        col.prop(rd, "ubf_bvh_rtsort")
+        col.prop(rd, "ubf_bvh_cutpar")
+        col.prop(rd, "ubf_psys_par")
+        col.prop(rd, "ubf_hair_cache")
+
 
 class RENDER_PT_motion_blur(RenderButtonsPanel, Panel):
     bl_label = "Sampled Motion Blur"
@@ -277,6 +288,7 @@ class RENDER_PT_performance(RenderButtonsPanel, Panel):
         col.separator()
         col.label(text="Rasterizer:")
         col.prop(rd, "rasterizer_mode", text="")
+        col.prop(rd, "ubf_bi_ssr", text="BI screen-space reflections")
 
         col.separator()
         col.prop(rd, "preview_start_resolution")

@@ -49,6 +49,17 @@ class PHYSICS_PT_game_physics(PhysicsButtonsPanel, Panel):
 
         physics_type = game.physics_type
 
+        # Box3D has no soft bodies at all, so the soft body settings are dead
+        # weight while it is the active engine.
+        box3d = (context.scene.game_settings.physics_engine == 'BOX3D')
+
+        if box3d and physics_type == 'SOFT_BODY':
+            col = layout.column()
+            col.label(text="Box3D: soft bodies are not supported,", icon='ERROR')
+            col.label(text="this object gets no physics at all.")
+            layout.prop(ob, "hide_render", text="Invisible")
+            return
+
         if physics_type == 'CHARACTER':
             layout.prop(game, "use_actor")
             layout.prop(ob, "hide_render", text="Invisible")  # out of place but useful
@@ -206,6 +217,10 @@ class PHYSICS_PT_game_collision_bounds(PhysicsButtonsPanel, Panel):
     def poll(cls, context):
         game = context.object.game
         rd = context.scene.render
+        if context.scene.game_settings.physics_engine == 'BOX3D' and game.physics_type == 'SOFT_BODY':
+            # Box3D has no soft bodies, and without one there is no shape to
+            # describe either
+            return False
         return (rd.engine in cls.COMPAT_ENGINES) \
             and (game.physics_type in {'SENSOR', 'STATIC', 'DYNAMIC', 'RIGID_BODY', 'CHARACTER', 'SOFT_BODY'})
 
@@ -247,6 +262,9 @@ class PHYSICS_PT_game_obstacles(PhysicsButtonsPanel, Panel):
     def poll(cls, context):
         game = context.object.game
         rd = context.scene.render
+        # the DBVT occlusion culling tree is Bullet only
+        if context.scene.game_settings.physics_engine == 'BOX3D':
+            return False
         return (rd.engine in cls.COMPAT_ENGINES) \
             and (game.physics_type in {'SENSOR', 'STATIC', 'DYNAMIC', 'RIGID_BODY', 'SOFT_BODY', 'CHARACTER', 'NO_COLLISION'})
 
@@ -500,6 +518,9 @@ class SCENE_PT_game_physics(SceneButtonsPanel, Panel):
             col.label(text="Logic Steps:")
             col.prop(gs, "logic_step_max", text="Max")
 
+            # Deactivation is read by both backends (Box3D maps it on to its own
+            # sleeping rules), the DBVT occlusion culling tree only exists in
+            # Bullet.
             col = layout.column()
             col.label(text="Physics Deactivation:")
             sub = col.row(align=True)
@@ -508,11 +529,12 @@ class SCENE_PT_game_physics(SceneButtonsPanel, Panel):
             sub = col.row()
             sub.prop(gs, "deactivation_time", text="Time")
 
-            col = layout.column()
-            col.prop(gs, "use_occlusion_culling", text="Occlusion Culling")
-            sub = col.column()
-            sub.active = gs.use_occlusion_culling
-            sub.prop(gs, "occlusion_culling_resolution", text="Resolution")
+            if gs.physics_engine == 'BULLET':
+                col = layout.column()
+                col.prop(gs, "use_occlusion_culling", text="Occlusion Culling")
+                sub = col.column()
+                sub.active = gs.use_occlusion_culling
+                sub.prop(gs, "occlusion_culling_resolution", text="Resolution")
 
         else:
             split = layout.split()
@@ -534,7 +556,9 @@ class SCENE_PT_game_physics_obstacles(SceneButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         scene = context.scene
-        return (scene.render.engine in cls.COMPAT_ENGINES)
+        # the DBVT obstacle tree is Bullet only, Box3D's CullingTest() is a no-op
+        return (scene.render.engine in cls.COMPAT_ENGINES
+                and scene.game_settings.physics_engine != 'BOX3D')
 
     def draw(self, context):
         layout = self.layout

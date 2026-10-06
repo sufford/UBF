@@ -648,6 +648,7 @@ function(SETUP_BLENDER_SORTED_LIBS)
 		ge_converter
 		ge_phys_dummy
 		ge_phys_bullet
+		ge_phys_box3d
 		bf_intern_smoke
 		extern_lzma
 		extern_curve_fit_nd
@@ -755,6 +756,9 @@ function(SETUP_BLENDER_SORTED_LIBS)
 	if(WITH_BULLET AND NOT WITH_SYSTEM_BULLET)
 		list_insert_after(BLENDER_SORTED_LIBS "ge_logic_ngnetwork" "extern_bullet")
 	endif()
+
+	# The vendored Box3D source tree is always built, see intern/CMakeLists.txt
+	list_insert_after(BLENDER_SORTED_LIBS "ge_logic_ngnetwork" "bf_intern_rigidbody_box3d")
 
 	if(WITH_GAMEENGINE_DECKLINK)
 		list(APPEND BLENDER_SORTED_LIBS bf_intern_decklink)

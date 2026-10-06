@@ -39,6 +39,10 @@ using std::isfinite;
 
 #include "BLI_math.h"
 #include "BLI_utildefines.h"
+#include "BLI_task.h"               /* ★ C1d: параллельные сортировки осей */
+#include "../source/RE_Prof.h"      /* ★ C1d: замер сортировок */
+
+#include <stdlib.h>   /* ★ PROF: getenv для UBF_BVH_NOSCRATCH */
 
 static bool selected_node(RTBuilder::Object *node)
 {
@@ -52,6 +56,8 @@ static void rtbuild_init(RTBuilder *b)
 	b->primitives.end     = NULL;
 	b->primitives.maxsize = 0;
 	b->depth = 0;
+	b->sweep_scratch = NULL;      /* ★ PROF */
+	b->sweep_scratch_size = 0;    /* ★ PROF */
 
 	for (int i = 0; i < RTBUILD_MAX_CHILDS; i++)
 		b->child_offset[i] = 0;
@@ -89,6 +95,12 @@ void rtbuild_free(RTBuilder *b)
 	for (int i = 0; i < 3; i++)
 		if (b->sorted_begin[i])
 			MEM_freeN(b->sorted_begin[i]);
+
+	if (b->sweep_scratch) {      /* ★ PROF: владелец заготовки — корень */
+		MEM_freeN(b->sweep_scratch);
+		b->sweep_scratch = NULL;
+		b->sweep_scratch_size = 0;
+	}
 
 	MEM_freeN(b);
 }
@@ -152,8 +164,59 @@ static void object_sort(Item *begin, Item *end, int axis)
 	assert(false);
 }
 
+/* ★ C1d: ТРИ СОРТИРОВКИ ОСЕЙ — ПАРАЛЛЕЛЬНО.
+ *
+ * Замер (C1): `rtbuild_done` стоит 0.67 s из 3.9 s фазы raytree и это чистая
+ * серийная работа — три полных std::sort по ~2 млн указателей. Оси независимы:
+ * разные массивы, объекты только читаются. Результат каждой сортировки не зависит
+ * от того, кто её считал (порядок — полный: bb по оси, при равенстве указатель),
+ * поэтому дерево остаётся битово тем же.
+ *
+ * Порог по размеру: на боевой сцене деревьев 274, и почти все мелкие — там потоки
+ * дороже работы, поэтому параллелим только большие.
+ *
+ * Ручка: UBF_BVH_RTSORT (по умолчанию ВКЛ — параллельные сортировки осей, битово
+ * те же; UBF_BVH_RTSORT=0 возвращает прежнее поведение). */
+struct RTBuildSortData {
+	RTBuilder *b;
+};
+
+static void rtbuild_sort_one(void *userdata, const int axis, const ParallelRangeTLS *UNUSED(tls))
+{
+	RTBuildSortData *d = (RTBuildSortData *)userdata;
+
+	if (d->b->sorted_begin[axis])
+		object_sort(d->b->sorted_begin[axis], d->b->sorted_end[axis], axis);
+}
+
 void rtbuild_done(RTBuilder *b, RayObjectControl *ctrl)
 {
+	int size = rtbuild_size(b);
+	/* ★ UBF: значение берётся из .blend (RenderData.ubf_switches) либо из
+	 * переменной окружения — переменная важнее; см. rayobject_internal.h. */
+	int par_env = RE_rayobject_ubf_bvh_rtsort();
+
+	if (par_env && size >= 65536) {
+		RTBuildSortData data;
+		ParallelRangeSettings settings;
+		double t0;
+
+		if (RE_rayobjectcontrol_test_break(ctrl))
+			return;
+
+		data.b = b;
+		BLI_parallel_range_settings_defaults(&settings);
+		settings.use_threading = true;
+
+		t0 = RE_prof_tick();
+		BLI_task_parallel_range(0, 3, &data, rtbuild_sort_one, &settings);
+
+		if (RE_prof_active())
+			printf("[PROF] ИТОГ BVH-сортировки: %.4f s (параллельно, 3 оси, %d элементов)\n",
+			       RE_prof_tick() - t0, size);
+		return;
+	}
+
 	for (int i = 0; i < 3; i++) {
 		if (b->sorted_begin[i]) {
 			if (RE_rayobjectcontrol_test_break(ctrl)) break;
@@ -172,6 +235,9 @@ RTBuilder *rtbuild_get_child(RTBuilder *b, int child, RTBuilder *tmp)
 	rtbuild_init(tmp);
 
 	tmp->depth = b->depth + 1;
+	/* ★ PROF: заготовка свипа одна на всё дерево */
+	tmp->sweep_scratch = b->sweep_scratch;
+	tmp->sweep_scratch_size = b->sweep_scratch_size;
 
 	for (int i = 0; i < 3; i++)
 		if (b->sorted_begin[i]) {
@@ -344,9 +410,49 @@ int rtbuild_heuristic_object_split(RTBuilder *b, int nchilds)
 		baxis = -1;
 		boffset = size / 2;
 
-		SweepCost *sweep = (SweepCost *)MEM_mallocN(sizeof(SweepCost) * size, "RTBuilder.HeuristicSweep");
+		/* ★ PROF: ниже порога UBF_BVH_SAH_MIN делим по медиане вдоль самой
+		 * длинной оси — без полного SAH-свипа (он даёт Σ size по узлам ≈ 42 млн
+		 * посещений × 3 оси на боевой сцене). Качество дерева держат верхние
+		 * уровни, где SAH и остаётся. Порог 0 = прежнее поведение (SAH везде).
+		 * Ось всё равно нужна: устойчивое разбиение трёх отсортированных
+		 * массивов обязано остаться корректным. */
+		static int sah_min_env = -2;
+		int use_cheap;
 
-		for (int axis = 0; axis < 3; axis++) {
+		if (sah_min_env == -2) {
+			const char *s = getenv("UBF_BVH_SAH_MIN");
+			sah_min_env = s ? atoi(s) : 0;
+		}
+		use_cheap = (sah_min_env > 0 && size <= sah_min_env);
+
+		/* ★ PROF: заготовку свипа держим одну на всё дерево. Раньше здесь был
+		 * MEM_mallocN/MEM_freeN на каждом внутреннем узле: на боевой сцене
+		 * (1.97 млн граней) это ~1 млн пар malloc/free и ~1.7 ГБ трафика
+		 * аллокаций, что и давало ~3.5 s сборки. Разбиение считается ровно
+		 * теми же числами, поэтому дерево получается битово тем же.
+		 * UBF_BVH_NOSCRATCH=1 возвращает прежнее поведение (для замера). */
+		static int no_scratch = -1;
+		SweepCost *sweep;
+		int sweep_owned = 0;
+
+		if (no_scratch < 0)
+			no_scratch = getenv("UBF_BVH_NOSCRATCH") ? 1 : 0;
+
+		if (!no_scratch && !b->sweep_scratch && b->primitives.maxsize > 0) {
+			b->sweep_scratch = MEM_mallocN(sizeof(SweepCost) * b->primitives.maxsize,
+			                               "RTBuilder.sweep_scratch");
+			b->sweep_scratch_size = b->primitives.maxsize;
+		}
+
+		if (!no_scratch && b->sweep_scratch && b->sweep_scratch_size >= size) {
+			sweep = (SweepCost *)b->sweep_scratch;
+		}
+		else {
+			sweep = (SweepCost *)MEM_mallocN(sizeof(SweepCost) * size, "RTBuilder.HeuristicSweep");
+			sweep_owned = 1;
+		}
+
+		for (int axis = 0; axis < (use_cheap ? 0 : 3); axis++) {
 			SweepCost sweep_left;
 
 			RTBuilder::Object **obj = b->sorted_begin[axis];
@@ -416,10 +522,18 @@ int rtbuild_heuristic_object_split(RTBuilder *b, int nchilds)
 				baxis = 0;
 		}
 
+		if (use_cheap) {   /* ★ PROF: медиана вдоль самой длинной оси */
+			rtbuild_calc_bb(b);
+			baxis = bb_largest_axis(b->bb, b->bb + 3);
+			if (!(baxis >= 0 && baxis < 3))
+				baxis = 0;
+		}
 
-		MEM_freeN(sweep);
+
+		if (sweep_owned) MEM_freeN(sweep);   /* ★ PROF: заготовку не освобождаем */
 	}
 	else if (size == 2) {
+
 		baxis = 0;
 		boffset = 1;
 	}

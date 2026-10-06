@@ -28,6 +28,7 @@
 #endif
 
 #include <stdio.h>
+#include <typeinfo>
 
 #include "KX_Scene.h"
 #include "KX_PythonInit.h"
@@ -2037,6 +2038,16 @@ bool KX_Scene::MergeScene(KX_Scene *other)
 	{
 		printf("KX_Scene::MergeScene: physics scenes type differ, aborting\n");
 		printf("\tsource %d, terget %d\n", (int)(env!=NULL), (int)(env_other!=NULL));
+		return false;
+	}
+
+	/* Different engines are not interchangeable: merging a Box3D scene into a
+	 * Bullet one (or the other way round) would end up casting a controller to
+	 * the wrong type.  This is what happens when a .blend saved with another
+	 * physics engine is lib-loaded into a running game. */
+	if (env != NULL && typeid(*env) != typeid(*env_other))
+	{
+		printf("KX_Scene::MergeScene: physics engines differ, aborting\n");
 		return false;
 	}
 

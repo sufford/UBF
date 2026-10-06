@@ -164,6 +164,25 @@ if(WITH_INTERNATIONAL)
 	add_definitions(-DWITH_INTERNATIONAL)
 endif()
 
+# ★ UBF: CUDA-бэкенд (этап A). Отдельная статическая библиотека, чтобы nvcc не
+# трогал основной код: ядро марша и его хост-часть живут в ubf_cuda.cu.
+# Только при WITH_UBF_CUDA; по умолчанию опция ВЫКЛ и всё как было.
+if(WITH_UBF_CUDA)
+	find_package(CUDA REQUIRED)
+	set(UBF_CUDA_SRC
+		intern/source/ubf_cuda.cu
+	)
+	# -fmad=false обязателен: иначе nvcc склеит mul+add и результат разойдётся
+	# с CPU-эталоном в младших битах (а на длинном марше это переключит пиксель).
+	list(APPEND CUDA_NVCC_FLAGS -fmad=false)
+	cuda_add_library(bf_ubf_cuda STATIC "${UBF_CUDA_SRC}" OPTIONS -fmad=false)
+	# В список BLENDER_LINK_LIBS не пишем: его сортировщик (SETUP_BLENDER_SORTED_LIBS)
+	# собирает BLENDER_SORTED_LIBS из своего набора имён и нашу цель теряет —
+	# поэтому bf_ubf_cuda привязана явно в source/creator/CMakeLists.txt.
+	add_definitions(-DWITH_UBF_CUDA)
+	message(STATUS "UBF: CUDA-бэкенд включён (nvcc ${CUDA_NVCC_EXECUTABLE})")
+endif()
+
 if(APPLE)
 	# SSE math is enabled by default on x86_64
 	if(CMAKE_OSX_ARCHITECTURES MATCHES "i386")

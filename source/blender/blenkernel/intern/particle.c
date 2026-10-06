@@ -411,6 +411,148 @@ void BKE_particlesettings_free(ParticleSettings *part)
 	fluid_free_settings(part->fluid);
 }
 
+/* ★ UBF_HAIR_CACHE (по умолчанию ВКЛ — боевое поведение по решению человека;
+ * UBF_HAIR_CACHE=0 возвращает пересчёт на каждом кадре): не считать заново шаги
+ * роста волос, если входы пересчёта те же, что у последнего полного пересчёта
+ * в этой сессии.
+ *
+ * Замер (B0-кэш в HANDOFF_GPU_RECON.md): хеш состояния волос после полного пересчёта
+ * одинаков на кадрах 29, 30 и 31 (ab06873b83676264, каждый кадр — отдельный процесс),
+ * то есть на боевой сцене кадр в пересчёт не входит: эмиссия к 29-му кадру насыщена.
+ * Пересчёт стоит 1.24 s на кадр на 100 000 волос (замер D3).
+ *
+ * Что проверяется для пропуска: система волосяная; состояние волос валидно
+ * (PSYS_HAIR_DONE); ключ входов (ParticleSettings целиком, seed, число частиц, имя
+ * объекта) совпал с ключом последнего пересчёта; кадр тот же или ровно на единицу
+ * больше — то есть последовательная протяжка, а при перескоке считаем заново.
+ *
+ * Hair dynamics пропуску не мешает: она продвигается позже, в hair_step(), и при
+ * пропуске роста никуда не девается. Проверено замером на боевой сцене, где
+ * динамика включена: три кадра анимации с кэшем и без него дают max=0 (76800 px).
+ *
+ * Честно про границы: в общем случае кадр в пересчёт входит — через эмиссию, время
+ * жизни частиц и эффекторы. Независимость от кадра измерена на боевой сцене (см.
+ * B0-кэш и B1-кэш в HANDOFF), а не доказана для любых сцен, поэтому ручку можно
+ * выключить (`UBF_HAIR_CACHE=0`), и тогда поведение прежнее — пересчёт на каждом
+ * кадре. Битовость проверена сравнением пикселей на анимации (max=0). */
+typedef struct UbfHairCacheEntry {
+	ParticleSystem *psys;
+	unsigned int key;
+	int frame;
+	bool valid;
+} UbfHairCacheEntry;
+
+#define UBF_HAIR_CACHE_SLOTS 8
+static UbfHairCacheEntry ubf_hair_cache[UBF_HAIR_CACHE_SLOTS];
+
+/* Значение: переменная окружения (если задана) → поле .blend
+ * (RenderData.ubf_switches, бит 3) → умолчание ВКЛ. Бит в файле означает
+ * ВЫКЛЮЧЕНО, поэтому файлы, сохранённые до появления поля (там нули), ведут
+ * себя как раньше — с кэшем. */
+static bool ubf_hair_cache_enabled(Scene *scene)
+{
+	const char *e = getenv("UBF_HAIR_CACHE");
+
+	if (e)
+		return e[0] != '0';
+	if (scene)
+		return (scene->r.ubf_switches & 8) == 0;
+	return true;
+}
+
+static unsigned int ubf_hair_cache_key(Object *ob, ParticleSystem *psys)
+{
+	unsigned int h = 2166136261u;
+	const char *name = ob->id.name + 2;
+	const unsigned char *p = (const unsigned char *)psys->part;
+	size_t i;
+
+	for (i = 0; i < sizeof(ParticleSettings); i++) {
+		h ^= p[i];
+		h *= 16777619u;
+	}
+	for (i = 0; i < sizeof(psys->seed); i++) {
+		h ^= ((const unsigned char *)&psys->seed)[i];
+		h *= 16777619u;
+	}
+	for (i = 0; i < sizeof(psys->totpart); i++) {
+		h ^= ((const unsigned char *)&psys->totpart)[i];
+		h *= 16777619u;
+	}
+	for (i = 0; name[i]; i++) {
+		h ^= (unsigned char)name[i];
+		h *= 16777619u;
+	}
+	return h;
+}
+
+static UbfHairCacheEntry *ubf_hair_cache_find(ParticleSystem *psys, bool create)
+{
+	int i, free_slot = -1;
+
+	for (i = 0; i < UBF_HAIR_CACHE_SLOTS; i++) {
+		if (ubf_hair_cache[i].valid && ubf_hair_cache[i].psys == psys)
+			return &ubf_hair_cache[i];
+		if (!ubf_hair_cache[i].valid && free_slot < 0)
+			free_slot = i;
+	}
+	if (!create)
+		return NULL;
+	if (free_slot < 0)
+		free_slot = 0;   /* переполнение: вытесняем первый слот */
+	return &ubf_hair_cache[free_slot];
+}
+
+/* зовётся из free_hair(): волосы освободили — кэш недействителен */
+void ubf_hair_cache_invalidate(ParticleSystem *psys)
+{
+	UbfHairCacheEntry *e = ubf_hair_cache_find(psys, false);
+
+	if (e)
+		e->valid = false;
+}
+
+int ubf_hair_cache_can_skip(Scene *scene, Object *ob, ParticleSystem *psys, float cfra)
+{
+	UbfHairCacheEntry *e = NULL;
+	unsigned int key = 0;
+	int ok = 0;
+
+	if (!ubf_hair_cache_enabled(scene) || !ob || !psys || !psys->part)
+		goto out;
+	if (psys->part->type != PART_HAIR)
+		goto out;
+	if ((psys->flag & PSYS_HAIR_DONE) == 0)
+		goto out;
+	if ((psys->part->flag & PART_HAIR_REGROW) && !psys->edit)
+		goto out;
+
+	e = ubf_hair_cache_find(psys, false);
+	if (!e || !e->valid)
+		goto out;
+	key = ubf_hair_cache_key(ob, psys);
+	if (e->key != key)
+		goto out;
+	if ((int)cfra != e->frame && (int)cfra != e->frame + 1)
+		goto out;
+
+	ok = 1;
+out:
+	return ok;
+}
+
+void ubf_hair_cache_remember(Object *ob, ParticleSystem *psys, float cfra)
+{
+	UbfHairCacheEntry *e = ubf_hair_cache_find(psys, true);
+
+	if (!e)
+		return;
+	e->psys = psys;
+	e->key = ubf_hair_cache_key(ob, psys);
+	e->frame = (int)cfra;
+	e->valid = true;
+}
+
 void free_hair(Object *UNUSED(ob), ParticleSystem *psys, int dynamics)
 {
 	PARTICLE_P;
@@ -423,6 +565,8 @@ void free_hair(Object *UNUSED(ob), ParticleSystem *psys, int dynamics)
 	}
 
 	psys->flag &= ~PSYS_HAIR_DONE;
+
+	ubf_hair_cache_invalidate(psys);   /* ★ UBF_HAIR_CACHE */
 
 	if (psys->clmd) {
 		if (dynamics) {
@@ -2555,6 +2699,195 @@ static void cache_key_incremental_rotation(ParticleCacheKey *key0, ParticleCache
 	}
 }
 
+/* ★ UBF_PSYS_PAR: параллельный расчёт pathcache волос (BI-путь). По умолчанию ВКЛ
+ * (боевое значение по решению человека); UBF_PSYS_PAR=0 возвращает последовательный
+ * обход.
+ * Результат битово тот же, что при последовательном обходе: каждая частица пишет только
+ * в свои cache[p] и pa->hair, а per-particle состояние (prev_tangent: в
+ * cache_key_incremental_rotation при i == 1 всегда перезаписывается до чтения, а цикл
+ * вращения начинается с k = 1) между частицами не переносится. psys_frand() — чистая
+ * функция от (psys->seed, индекс) по read-only таблицам. */
+/* Значение берётся так: переменная окружения (если задана) → поле .blend
+ * (RenderData.ubf_switches, бит 2) → умолчание ВКЛ. Переменная важнее файла:
+ * иначе стенды, приёмка и замеры зависели бы от того, что сохранено в сцене. */
+static bool ubf_psys_par_enabled(Scene *scene)
+{
+	const char *e = getenv("UBF_PSYS_PAR");
+
+	if (e)
+		return e[0] != '0';
+	if (scene)
+		return (scene->r.ubf_switches & 4) == 0;   /* бит в файле = ВЫКЛ */
+	return true;
+}
+
+typedef struct UbfPsysPathCtx {
+	ParticleSimulationData *sim;
+	ParticleSystem *psys;
+	ParticleSettings *part;
+	ParticleSystemModifierData *psmd;
+	ParticleCacheKey **cache;
+	DerivedMesh *hair_dm;
+	int segments;
+	int keyed;
+	int baked;
+	float col[4];
+	float *vg_effector;
+	float *vg_length;
+	float dfra;
+	float cfra;
+} UbfPsysPathCtx;
+
+static void psys_cache_paths_one(void *userdata, const int p, const ParallelRangeTLS *UNUSED(tls))
+{
+	UbfPsysPathCtx *ctx = userdata;
+	ParticleSimulationData *sim = ctx->sim;
+	ParticleSystem *psys = ctx->psys;
+	ParticleSettings *part = ctx->part;
+	ParticleSystemModifierData *psmd = ctx->psmd;
+	ParticleCacheKey **cache = ctx->cache;
+	DerivedMesh *hair_dm = ctx->hair_dm;
+	const int segments = ctx->segments;
+	const int keyed = ctx->keyed;
+	const int baked = ctx->baked;
+	float *col = ctx->col;
+	float *vg_effector = ctx->vg_effector;
+	float *vg_length = ctx->vg_length;
+	const float dfra = ctx->dfra;
+	const float cfra = ctx->cfra;
+	ParticleData *pa = psys->particles + p;
+	ParticleInterpolationData pind;
+	ParticleTexture ptex;
+	ParticleKey result;
+	ParticleCacheKey *ca;
+	float hairmat[4][4], rotmat[3][3], prev_tangent[3] = {0.0f, 0.0f, 0.0f};
+	float birthtime = 0.0f, dietime = 0.0f, pa_length = 1.0f;
+	float t, time = 0.0f, length, vec[3];
+	int k;
+	if (!psys->totchild) {
+		psys_get_texture(sim, pa, &ptex, PAMAP_LENGTH, 0.f);
+		pa_length = ptex.length * (1.0f - part->randlength * psys_frand(psys, psys->seed + p));
+		if (vg_length)
+			pa_length *= psys_particle_value_from_verts(psmd->dm_final, part->from, pa, vg_length);
+	}
+
+	pind.keyed = keyed;
+	pind.cache = baked ? psys->pointcache : NULL;
+	pind.epoint = NULL;
+	pind.bspline = (psys->part->flag & PART_HAIR_BSPLINE);
+	pind.dm = hair_dm;
+
+	memset(cache[p], 0, sizeof(*cache[p]) * (segments + 1));
+
+	cache[p]->segments = segments;
+
+	/*--get the first data points--*/
+	init_particle_interpolation(sim->ob, sim->psys, pa, &pind);
+
+	/* hairmat is needed for for non-hair particle too so we get proper rotations */
+	psys_mat_hair_to_global(sim->ob, psmd->dm_final, psys->part->from, pa, hairmat);
+	copy_v3_v3(rotmat[0], hairmat[2]);
+	copy_v3_v3(rotmat[1], hairmat[1]);
+	copy_v3_v3(rotmat[2], hairmat[0]);
+
+	if (part->draw & PART_ABS_PATH_TIME) {
+		birthtime = MAX2(pind.birthtime, part->path_start);
+		dietime = MIN2(pind.dietime, part->path_end);
+	}
+	else {
+		float tb = pind.birthtime;
+		birthtime = tb + part->path_start * (pind.dietime - tb);
+		dietime = tb + part->path_end * (pind.dietime - tb);
+	}
+
+	if (birthtime >= dietime) {
+		cache[p]->segments = -1;
+		return;
+	}
+
+	dietime = birthtime + pa_length * (dietime - birthtime);
+
+	/*--interpolate actual path from data points--*/
+	for (k = 0, ca = cache[p]; k <= segments; k++, ca++) {
+		time = (float)k / (float)segments;
+		t = birthtime + time * (dietime - birthtime);
+		result.time = -t;
+		do_particle_interpolation(psys, p, pa, t, &pind, &result);
+		copy_v3_v3(ca->co, result.co);
+
+		/* dynamic hair is in object space */
+		/* keyed and baked are already in global space */
+		if (hair_dm)
+			mul_m4_v3(sim->ob->obmat, ca->co);
+		else if (!keyed && !baked && !(psys->flag & PSYS_GLOBAL_HAIR))
+			mul_m4_v3(hairmat, ca->co);
+
+		copy_v3_v3(ca->col, col);
+	}
+
+	if (part->type == PART_HAIR) {
+		HairKey *hkey;
+
+		for (k = 0, hkey = pa->hair; k < pa->totkey; ++k, ++hkey) {
+			mul_v3_m4v3(hkey->world_co, hairmat, hkey->co);
+		}
+	}
+
+	/*--modify paths and calculate rotation & velocity--*/
+
+	if (!(psys->flag & PSYS_GLOBAL_HAIR)) {
+		/* apply effectors */
+		if ((psys->part->flag & PART_CHILD_EFFECT) == 0) {
+			float effector = 1.0f;
+			if (vg_effector)
+				effector *= psys_particle_value_from_verts(psmd->dm_final, psys->part->from, pa, vg_effector);
+
+			sub_v3_v3v3(vec, (cache[p] + 1)->co, cache[p]->co);
+			length = len_v3(vec);
+
+			for (k = 1, ca = cache[p] + 1; k <= segments; k++, ca++)
+				do_path_effectors(sim, p, ca, k, segments, cache[p]->co, effector, dfra, cfra, &length, vec);
+		}
+
+		/* apply guide curves to path data */
+		if (sim->psys->effectors && (psys->part->flag & PART_CHILD_EFFECT) == 0) {
+			for (k = 0, ca = cache[p]; k <= segments; k++, ca++)
+				/* ca is safe to cast, since only co and vel are used */
+				do_guides(sim->psys->part, sim->psys->effectors, (ParticleKey *)ca, p, (float)k / (float)segments);
+		}
+
+		/* lattices have to be calculated separately to avoid mixups between effector calculations */
+		if (psys->lattice_deform_data) {
+			for (k = 0, ca = cache[p]; k <= segments; k++, ca++)
+				calc_latt_deform(psys->lattice_deform_data, ca->co, psys->lattice_strength);
+		}
+	}
+
+	/* finally do rotation & velocity */
+	for (k = 1, ca = cache[p] + 1; k <= segments; k++, ca++) {
+		cache_key_incremental_rotation(ca, ca - 1, ca - 2, prev_tangent, k);
+
+		if (k == segments)
+			copy_qt_qt(ca->rot, (ca - 1)->rot);
+
+		/* set velocity */
+		sub_v3_v3v3(ca->vel, ca->co, (ca - 1)->co);
+
+		if (k == 1)
+			copy_v3_v3((ca - 1)->vel, ca->vel);
+
+		ca->time = (float)k / (float)segments;
+	}
+	/* First rotation is based on emitting face orientation.
+	 * This is way better than having flipping rotations resulting
+	 * from using a global axis as a rotation pole (vec_to_quat()).
+	 * It's not an ideal solution though since it disregards the
+	 * initial tangent, but taking that in to account will allow
+	 * the possibility of flipping again. -jahka
+	 */
+	mat3_to_quat_is_ok(cache[p]->rot, rotmat);
+}
+
 /**
  * Calculates paths ready for drawing/rendering
  * - Useful for making use of opengl vertex arrays for super fast strand drawing.
@@ -2625,129 +2958,39 @@ void psys_cache_paths(ParticleSimulationData *sim, float cfra, const bool use_re
 	}
 
 	/*---first main loop: create all actual particles' paths---*/
-	LOOP_PARTICLES {
-		if (!psys->totchild) {
-			psys_get_texture(sim, pa, &ptex, PAMAP_LENGTH, 0.f);
-			pa_length = ptex.length * (1.0f - part->randlength * psys_frand(psys, psys->seed + p));
-			if (vg_length)
-				pa_length *= psys_particle_value_from_verts(psmd->dm_final, part->from, pa, vg_length);
-		}
+	/* ★ UBF_PSYS_PAR: при выключенной ручке — тот же последовательный обход в том же
+	 * порядке; при включённой частицы считаются параллельно, результат битово тот же. */
+	{
+		UbfPsysPathCtx par_ctx;
 
-		pind.keyed = keyed;
-		pind.cache = baked ? psys->pointcache : NULL;
-		pind.epoint = NULL;
-		pind.bspline = (psys->part->flag & PART_HAIR_BSPLINE);
-		pind.dm = hair_dm;
+		par_ctx.sim = sim;
+		par_ctx.psys = psys;
+		par_ctx.part = part;
+		par_ctx.psmd = psmd;
+		par_ctx.cache = cache;
+		par_ctx.hair_dm = hair_dm;
+		par_ctx.segments = segments;
+		par_ctx.keyed = keyed;
+		par_ctx.baked = baked;
+		copy_v4_v4(par_ctx.col, col);
+		par_ctx.vg_effector = vg_effector;
+		par_ctx.vg_length = vg_length;
+		par_ctx.dfra = dfra;
+		par_ctx.cfra = cfra;
 
-		memset(cache[p], 0, sizeof(*cache[p]) * (segments + 1));
+		if (ubf_psys_par_enabled(sim->scene) && totpart > 1) {
+			ParallelRangeSettings settings;
 
-		cache[p]->segments = segments;
-
-		/*--get the first data points--*/
-		init_particle_interpolation(sim->ob, sim->psys, pa, &pind);
-
-		/* hairmat is needed for for non-hair particle too so we get proper rotations */
-		psys_mat_hair_to_global(sim->ob, psmd->dm_final, psys->part->from, pa, hairmat);
-		copy_v3_v3(rotmat[0], hairmat[2]);
-		copy_v3_v3(rotmat[1], hairmat[1]);
-		copy_v3_v3(rotmat[2], hairmat[0]);
-
-		if (part->draw & PART_ABS_PATH_TIME) {
-			birthtime = MAX2(pind.birthtime, part->path_start);
-			dietime = MIN2(pind.dietime, part->path_end);
+			BLI_parallel_range_settings_defaults(&settings);
+			settings.use_threading = true;
+			BLI_task_parallel_range(0, totpart, &par_ctx, psys_cache_paths_one, &settings);
 		}
 		else {
-			float tb = pind.birthtime;
-			birthtime = tb + part->path_start * (pind.dietime - tb);
-			dietime = tb + part->path_end * (pind.dietime - tb);
+			int p;
+
+			for (p = 0; p < totpart; ++p)
+				psys_cache_paths_one(&par_ctx, p, NULL);
 		}
-
-		if (birthtime >= dietime) {
-			cache[p]->segments = -1;
-			continue;
-		}
-
-		dietime = birthtime + pa_length * (dietime - birthtime);
-
-		/*--interpolate actual path from data points--*/
-		for (k = 0, ca = cache[p]; k <= segments; k++, ca++) {
-			time = (float)k / (float)segments;
-			t = birthtime + time * (dietime - birthtime);
-			result.time = -t;
-			do_particle_interpolation(psys, p, pa, t, &pind, &result);
-			copy_v3_v3(ca->co, result.co);
-
-			/* dynamic hair is in object space */
-			/* keyed and baked are already in global space */
-			if (hair_dm)
-				mul_m4_v3(sim->ob->obmat, ca->co);
-			else if (!keyed && !baked && !(psys->flag & PSYS_GLOBAL_HAIR))
-				mul_m4_v3(hairmat, ca->co);
-
-			copy_v3_v3(ca->col, col);
-		}
-
-		if (part->type == PART_HAIR) {
-			HairKey *hkey;
-
-			for (k = 0, hkey = pa->hair; k < pa->totkey; ++k, ++hkey) {
-				mul_v3_m4v3(hkey->world_co, hairmat, hkey->co);
-			}
-		}
-
-		/*--modify paths and calculate rotation & velocity--*/
-
-		if (!(psys->flag & PSYS_GLOBAL_HAIR)) {
-			/* apply effectors */
-			if ((psys->part->flag & PART_CHILD_EFFECT) == 0) {
-				float effector = 1.0f;
-				if (vg_effector)
-					effector *= psys_particle_value_from_verts(psmd->dm_final, psys->part->from, pa, vg_effector);
-
-				sub_v3_v3v3(vec, (cache[p] + 1)->co, cache[p]->co);
-				length = len_v3(vec);
-
-				for (k = 1, ca = cache[p] + 1; k <= segments; k++, ca++)
-					do_path_effectors(sim, p, ca, k, segments, cache[p]->co, effector, dfra, cfra, &length, vec);
-			}
-
-			/* apply guide curves to path data */
-			if (sim->psys->effectors && (psys->part->flag & PART_CHILD_EFFECT) == 0) {
-				for (k = 0, ca = cache[p]; k <= segments; k++, ca++)
-					/* ca is safe to cast, since only co and vel are used */
-					do_guides(sim->psys->part, sim->psys->effectors, (ParticleKey *)ca, p, (float)k / (float)segments);
-			}
-
-			/* lattices have to be calculated separately to avoid mixups between effector calculations */
-			if (psys->lattice_deform_data) {
-				for (k = 0, ca = cache[p]; k <= segments; k++, ca++)
-					calc_latt_deform(psys->lattice_deform_data, ca->co, psys->lattice_strength);
-			}
-		}
-
-		/* finally do rotation & velocity */
-		for (k = 1, ca = cache[p] + 1; k <= segments; k++, ca++) {
-			cache_key_incremental_rotation(ca, ca - 1, ca - 2, prev_tangent, k);
-
-			if (k == segments)
-				copy_qt_qt(ca->rot, (ca - 1)->rot);
-
-			/* set velocity */
-			sub_v3_v3v3(ca->vel, ca->co, (ca - 1)->co);
-
-			if (k == 1)
-				copy_v3_v3((ca - 1)->vel, ca->vel);
-
-			ca->time = (float)k / (float)segments;
-		}
-		/* First rotation is based on emitting face orientation.
-		 * This is way better than having flipping rotations resulting
-		 * from using a global axis as a rotation pole (vec_to_quat()).
-		 * It's not an ideal solution though since it disregards the
-		 * initial tangent, but taking that in to account will allow
-		 * the possibility of flipping again. -jahka
-		 */
-		mat3_to_quat_is_ok(cache[p]->rot, rotmat);
 	}
 
 	psys->totcached = totpart;

@@ -56,7 +56,10 @@ void KX_SoftBodyDeformer::Relink(CTR_Map<class CTR_HashedPtr, void*>*map)
 
 bool KX_SoftBodyDeformer::Apply(class RAS_IPolyMaterial *polymat)
 {
-	CcdPhysicsController* ctrl = (CcdPhysicsController*) m_gameobj->GetPhysicsController();
+	/* UBF: the active physics environment may not be Bullet at all, in which
+	 * case the controller is not a CcdPhysicsController and blindly casting it
+	 * would call GetSoftBody() on the wrong object. */
+	CcdPhysicsController* ctrl = dynamic_cast<CcdPhysicsController*>(m_gameobj->GetPhysicsController());
 	if (!ctrl)
 		return false;
 

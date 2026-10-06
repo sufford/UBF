@@ -425,6 +425,12 @@ mark_as_advanced(WITH_CYCLES_CUDA_BUILD_SERIAL)
 set(CYCLES_CUDA_BINARIES_ARCH sm_61 sm_75 sm_86 CACHE STRING "CUDA architectures to build binaries for")
 mark_as_advanced(CYCLES_CUDA_BINARIES_ARCH)
 unset(PLATFORM_DEFAULT)
+
+# UBF: CUDA-бэкенд (этап A). По умолчанию ВЫКЛ — сборка без CUDA обязана
+# оставаться рабочей, а включённый бэкенд выбирается в рантайме (UBF_BI_SSR_GPU).
+option(WITH_UBF_CUDA "Build UBF CUDA backend (GPU march, GPU effects)" OFF)
+mark_as_advanced(WITH_UBF_CUDA)
+
 option(WITH_CYCLES_LOGGING	"Build Cycles with logging support" ON)
 option(WITH_CYCLES_DEBUG	"Build Cycles with extra debug capabilities" OFF)
 option(WITH_CYCLES_NATIVE_ONLY	"Build Cycles with native kernel only (which fits current CPU, use for development only)" OFF)
