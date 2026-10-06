@@ -8,7 +8,7 @@ Currently featuring:
 
 
 Future roadmap:
-* Real-time Internal render
+* Real-time Internal render (In process)
 * Real-time Cycles render
 * OpenGL 3.3 (Unlikely, but possible)
 * VST support (Also unlikely)
