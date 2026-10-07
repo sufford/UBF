@@ -5,7 +5,7 @@ Currently featuring:
 * Dynamic layers (In process)
 * Custom modifiers (Currently 10 implemented and 1 backported; planning to increase up to 25 custom modifiers and 5 backported)
 * KXScript, replacing BGE python module lib (In process; extremely basic functions for now)
-
+* Box3D and Jolt physics engines (Hybrid coming soon)
 
 Future roadmap:
 * Real-time Internal render (In process)
@@ -13,4 +13,3 @@ Future roadmap:
 * OpenGL 3.3 (Unlikely, but possible)
 * VST support (Also unlikely)
 * Edit poly
-* A support for hybrid physics (Box3D + Jolt) implementation (Both physics engines currently compiles only, no wrapping yet)
