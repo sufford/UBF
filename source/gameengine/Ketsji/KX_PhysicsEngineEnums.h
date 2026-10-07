@@ -30,6 +30,7 @@ enum	e_PhysicsEngine
 		UseNone     =  0,
 		UseBullet   =  5,
 		UseBox3D    =  6,
+		UseJolt     =  7,
 };
 
 #endif  /* __KX_PHYSICSENGINEENUMS_H__ */

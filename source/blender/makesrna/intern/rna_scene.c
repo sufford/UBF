@@ -4460,6 +4460,7 @@ static void rna_def_scene_game_data(BlenderRNA *brna)
 		{WOPHY_NONE, "NONE", 0, "None", "Don't use a physics engine"},
 		{WOPHY_BULLET, "BULLET", 0, "Bullet", "Use the Bullet physics engine"},
 		{WOPHY_BOX3D, "BOX3D", 0, "Box3D", "Use the Box3D physics engine"},
+		{WOPHY_JOLT, "JOLT", 0, "Jolt", "Use the Jolt physics engine"},
 		{0, NULL, 0, NULL, NULL}
 	};
 

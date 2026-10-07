@@ -87,7 +87,7 @@ static dword STR_gHash(const void *in, int len, dword init_val)
 	dword a = (dword)GOLDEN_RATIO;
 	dword b = (dword)GOLDEN_RATIO;
 	dword c = init_val;  /* the previous hash value */
-	byte  *p_in = (byte *)in;
+	unsigned char *p_in = (unsigned char *)in;
 
 	// Do the largest part of the key
 	while (length >= 12)

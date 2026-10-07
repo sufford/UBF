@@ -110,6 +110,7 @@ endif()
 		ge_logic_ketsji
 		ge_phys_bullet
 		ge_phys_box3d
+		ge_phys_jolt
 		ge_phys_dummy
 		ge_logic
 		ge_rasterizer
@@ -130,6 +131,12 @@ endif()
 		ge_logic_ngnetwork
 		ge_logic_loopbacknetwork
 		extern_bullet
+		# The Box3D and Jolt engine libraries are static and are only pulled in
+		# because ge_phys_box3d / ge_phys_jolt reference them; without them the
+		# player fails to link on unresolved b3* / JPH:: symbols.  Same order as
+		# SETUP_BLENDER_SORTED_LIBS() in build_files/cmake/macros.cmake.
+		bf_intern_rigidbody_box3d
+		bf_intern_jolt
 		bf_intern_guardedalloc
 		bf_intern_memutil
 		bf_python_ext

@@ -649,6 +649,7 @@ function(SETUP_BLENDER_SORTED_LIBS)
 		ge_phys_dummy
 		ge_phys_bullet
 		ge_phys_box3d
+		ge_phys_jolt
 		bf_intern_smoke
 		extern_lzma
 		extern_curve_fit_nd
@@ -759,6 +760,15 @@ function(SETUP_BLENDER_SORTED_LIBS)
 
 	# The vendored Box3D source tree is always built, see intern/CMakeLists.txt
 	list_insert_after(BLENDER_SORTED_LIBS "ge_logic_ngnetwork" "bf_intern_rigidbody_box3d")
+
+	# The vendored Jolt source tree is always built, see intern/CMakeLists.txt.
+	# Inserted after Box3D so the vendored physics backends stay together; the
+	# order matters for the GNU linker, MSVC's linker re-scans libraries.
+	# NOTE: when source/gameengine/Physics/Jolt is wired up, ge_phys_jolt has to
+	# be added to the BLENDER_SORTED_LIBS literal above and listed before this.
+	if(TARGET bf_intern_jolt)
+		list_insert_after(BLENDER_SORTED_LIBS "bf_intern_rigidbody_box3d" "bf_intern_jolt")
+	endif()
 
 	if(WITH_GAMEENGINE_DECKLINK)
 		list(APPEND BLENDER_SORTED_LIBS bf_intern_decklink)

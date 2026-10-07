@@ -34,6 +34,7 @@ set(INC
 	../Network/LoopBackNetwork
 	../Physics/Bullet
 	../Physics/Box3D
+	../Physics/Jolt
 	../Physics/Dummy
 	../Physics/common
 	../Rasterizer

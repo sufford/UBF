@@ -940,6 +940,7 @@ typedef struct GameData {
 #define WOPHY_NONE		0
 #define WOPHY_BULLET	5
 #define WOPHY_BOX3D		6
+#define WOPHY_JOLT		7
 
 /* obstacleSimulation */
 #define OBSTSIMULATION_NONE		0

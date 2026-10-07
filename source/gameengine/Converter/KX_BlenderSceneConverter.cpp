@@ -42,6 +42,9 @@
 
 #include "DummyPhysicsEnvironment.h"
 #include "B3DPhysicsEnvironment.h"
+/* JoltPhysicsEnvironment.h needs C++17 and this file is C++14, so the converter
+ * only sees the factory declaration. */
+#include "JoltPhysicsEnvironmentFactory.h"
 
 
 #ifdef WITH_BULLET
@@ -252,6 +255,15 @@ void KX_BlenderSceneConverter::ConvertScene(KX_Scene *destinationscene, RAS_IRas
 
 			phy_env = B3DPhysicsEnvironment::Create(blenderscene, visualizePhysics);
 			physics_engine = UseBox3D;
+			break;
+		}
+	case WOPHY_JOLT:
+		{
+			SYS_SystemHandle syshandle = SYS_GetSystem(); /*unused*/
+			int visualizePhysics = SYS_GetCommandLineInt(syshandle, "show_physics", 0);
+
+			phy_env = PHY_JoltCreateEnvironment(blenderscene, visualizePhysics);
+			physics_engine = UseJolt;
 			break;
 		}
 	default:
