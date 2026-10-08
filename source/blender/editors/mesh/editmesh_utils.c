@@ -1331,6 +1331,12 @@ void EDBM_update_generic(BMEditMesh *em, const bool do_tessface, const bool is_d
 	Object *ob = em->ob;
 	/* order of calling isn't important */
 	DAG_id_tag_update(ob->data, OB_RECALC_DATA);
+	/* Edit Poly swaps ob->data for a temporary mesh that is not part of the
+	 * main database, so tagging the mesh alone does not re-evaluate the object
+	 * (the depsgraph cannot find the object through a mesh it does not track).
+	 * Tag the object itself so its modifier stack (incl. Edit Poly's cage) is
+	 * recomputed right after an edit operation. */
+	DAG_id_tag_update(&ob->id, OB_RECALC_DATA);
 	WM_main_add_notifier(NC_GEOM | ND_DATA, ob->data);
 
 	if (do_tessface) {

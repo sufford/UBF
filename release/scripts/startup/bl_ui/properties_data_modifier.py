@@ -40,6 +40,14 @@ class DATA_PT_modifiers(ModifierButtonsPanel, Panel):
         layout.operator_menu_enum("object.modifier_add", "type")
 
         for md in ob.modifiers:
+            # Spec 8.3: the Edit Poly being edited is highlighted in the stack,
+            # even when the modifier is collapsed.
+            if md.type == 'EDIT_POLY' and md.in_editmode:
+                box = layout.box()
+                col = box.column(align=True)
+                col.alert = True
+                col.label(text="Edit Poly: editing this mesh", icon='EDITMODE_HLT')
+
             box = layout.template_modifier(md)
             if box:
                 # match enum type to our functions, avoids a lookup table.
@@ -1754,11 +1762,12 @@ class DATA_PT_modifiers(ModifierButtonsPanel, Panel):
         col = row.column(align=True)
 
         if md.in_editmode:
+            col.alert = True
             col.operator("object.editpoly_exit", text="Exit Edit Poly Mode", icon='OBJECT_DATAMODE')
         else:
             col.operator("object.editpoly_enter", text="Edit Poly Mode", icon='EDITMODE_HLT')
 
-        col.operator("object.editpoly_reset", text="Clear History", icon='TRASH')
+        col.operator("object.editpoly_reset", text="Clear History", icon='X')
 
         if md.input_mismatch:
             box = layout.box()

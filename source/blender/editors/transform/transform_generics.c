@@ -791,6 +791,10 @@ static void recalcData_objects(TransInfo *t)
 			}
 
 			DAG_id_tag_update(t->obedit->data, 0);  /* sets recalc flags */
+			/* Edit Poly swaps ob->data for a temporary mesh that is not part of
+			 * the main database: tagging the mesh alone does not re-evaluate the
+			 * object, so tag the object itself while moving geometry. */
+			DAG_id_tag_update(&t->obedit->id, OB_RECALC_DATA);
 
 			EDBM_mesh_normals_update(em);
 			BKE_editmesh_tessface_calc(em);

@@ -49,6 +49,7 @@
 #include "DNA_object_types.h"
 
 #include "BKE_customdata.h"
+#include "BKE_depsgraph.h"
 #include "BKE_editmesh.h"
 #include "BKE_editpoly.h"
 
@@ -879,6 +880,11 @@ bool editpoly_record_undo_hook(const char *opname)
 	 * memfile steps) could not link it back and would leave the object without
 	 * data. Edit Poly therefore keeps its own history and swallows the step. */
 	editpoly_record_sync(ob, opname);
+
+	/* the temporary edit mesh is not in the main database, so the mesh tag done
+	 * by the edit operators does not reach the depsgraph: tag the object itself
+	 * so the modifier stack is recomputed right after the operation. */
+	DAG_id_tag_update(&ob->id, OB_RECALC_DATA);
 
 	return true;
 }
