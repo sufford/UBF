@@ -73,6 +73,7 @@
 #include "BKE_blender_undo.h"
 #include "BKE_context.h"
 #include "BKE_depsgraph.h"
+#include "BKE_editpoly.h"
 #include "BKE_global.h"
 #include "BKE_library.h"
 #include "BKE_main.h"
@@ -1147,6 +1148,14 @@ static bool wm_file_write(bContext *C, const char *filepath, int fileflags, Repo
 	BlendThumbnail *thumb, *main_thumb;
 	ImBuf *ibuf_thumb = NULL;
 
+	/* The Edit Poly modifier edits a temporary mesh that is not part of the main
+	 * database: writing it would store an object data pointer that cannot be
+	 * linked again. Saving has to wait until the edit mode is left. */
+	if (editpoly_session_active()) {
+		BKE_report(reports, RPT_ERROR, "Edit Poly: leave the Edit Poly edit mode before saving");
+		return ok;
+	}
+
 	len = strlen(filepath);
 
 	if (len == 0) {
@@ -1320,6 +1329,14 @@ void wm_autosave_timer(const bContext *C, wmWindowManager *wm, wmTimer *UNUSED(w
 	}
 
 	wm_autosave_location(filepath);
+
+	/* Same reason as in wm_file_write(): an autosave taken while the Edit Poly
+	 * edit mode is active would reference the temporary edit mesh. The undo
+	 * memfile branch below is safe, but a full file write is not. */
+	if (editpoly_session_active() && (U.uiflag & USER_GLOBALUNDO) == 0) {
+		wm->autosavetimer = WM_event_add_timer(wm, NULL, TIMERAUTOSAVE, U.savetime * 60.0);
+		return;
+	}
 
 	if (U.uiflag & USER_GLOBALUNDO) {
 		/* fast save of last undobuffer, now with UI */

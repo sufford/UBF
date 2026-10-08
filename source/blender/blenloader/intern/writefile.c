@@ -1720,6 +1720,71 @@ static void write_defgroups(WriteData *wd, ListBase *defbase)
 	}
 }
 
+/** Write one operation of the Edit Poly history.
+ *
+ *  The struct itself is written first: it carries the addresses of its arrays and
+ *  of the next operation, which are the keys the reader links everything back by.
+ *  The arrays follow as plain data, `writestruct()` cannot follow pointers. */
+static void write_editpoly_op(WriteData *wd, EditPolyOp *op)
+{
+	writestruct(wd, DATA, EditPolyOp, 1, op);
+
+	if (op->vert_ids) {
+		writedata(wd, DATA, sizeof(int) * op->vert_count, op->vert_ids);
+	}
+	if (op->vert_deltas) {
+		writedata(wd, DATA, sizeof(float) * 3 * op->vert_count, op->vert_deltas);
+	}
+	if (op->kill_vert_ids) {
+		writedata(wd, DATA, sizeof(int) * op->kill_vert_count, op->kill_vert_ids);
+	}
+	if (op->kill_edge_ids) {
+		writedata(wd, DATA, sizeof(int) * op->kill_edge_count, op->kill_edge_ids);
+	}
+	if (op->kill_face_ids) {
+		writedata(wd, DATA, sizeof(int) * op->kill_face_count, op->kill_face_ids);
+	}
+	if (op->new_vert_ids) {
+		writedata(wd, DATA, sizeof(int) * op->new_vert_count, op->new_vert_ids);
+	}
+	if (op->new_vert_co) {
+		writedata(wd, DATA, sizeof(float) * 3 * op->new_vert_count, op->new_vert_co);
+	}
+	if (op->new_vert_srcs) {
+		writedata(wd, DATA, sizeof(int) * op->new_vert_count, op->new_vert_srcs);
+	}
+	if (op->new_edge_ids) {
+		writedata(wd, DATA, sizeof(int) * op->new_edge_count, op->new_edge_ids);
+	}
+	if (op->new_edge_verts) {
+		writedata(wd, DATA, sizeof(int) * 2 * op->new_edge_count, op->new_edge_verts);
+	}
+	if (op->new_edge_srcs) {
+		writedata(wd, DATA, sizeof(int) * op->new_edge_count, op->new_edge_srcs);
+	}
+	if (op->new_face_ids) {
+		writedata(wd, DATA, sizeof(int) * op->new_face_count, op->new_face_ids);
+	}
+	if (op->new_face_offsets) {
+		writedata(wd, DATA, sizeof(int) * (op->new_face_count + 1), op->new_face_offsets);
+	}
+	if (op->new_loop_verts) {
+		writedata(wd, DATA, sizeof(int) * op->new_loop_count, op->new_loop_verts);
+	}
+	if (op->new_face_srcs) {
+		writedata(wd, DATA, sizeof(int) * op->new_face_count, op->new_face_srcs);
+	}
+	if (op->new_face_mats) {
+		writedata(wd, DATA, sizeof(short) * op->new_face_count, op->new_face_mats);
+	}
+	if (op->mat_face_ids) {
+		writedata(wd, DATA, sizeof(int) * op->mat_face_count, op->mat_face_ids);
+	}
+	if (op->mat_values) {
+		writedata(wd, DATA, sizeof(short) * op->mat_face_count, op->mat_values);
+	}
+}
+
 static void write_modifiers(WriteData *wd, ListBase *modbase)
 {
 	ModifierData *md;
@@ -1736,7 +1801,17 @@ static void write_modifiers(WriteData *wd, ListBase *modbase)
 
 		writestruct_id(wd, DATA, mti->structName, 1, md);
 
-		if (md->type == eModifierType_Hook) {
+		if (md->type == eModifierType_EditPoly) {
+			EditPolyModifierData *epmd = (EditPolyModifierData *)md;
+			EditPolyOp *op;
+
+			/* The operation history is the source of truth, it is written right
+			 * after the modifier (see write_editpoly_op). */
+			for (op = epmd->ops.first; op; op = op->next) {
+				write_editpoly_op(wd, op);
+			}
+		}
+		else if (md->type == eModifierType_Hook) {
 			HookModifierData *hmd = (HookModifierData *)md;
 
 			if (hmd->curfalloff) {

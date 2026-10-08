@@ -106,6 +106,7 @@ set(SRC
 	intern/editlattice.c
 	intern/editmesh.c
 	intern/editmesh_bvh.c
+	intern/editpoly_runtime.c
 	intern/effect.c
 	intern/fcurve.c
 	intern/fluidsim.c
@@ -237,6 +238,7 @@ set(SRC
 	BKE_dynamicpaint.h
 	BKE_editlattice.h
 	BKE_editmesh.h
+	BKE_editpoly.h
 	BKE_editmesh_bvh.h
 	BKE_effect.h
 	BKE_fcurve.h

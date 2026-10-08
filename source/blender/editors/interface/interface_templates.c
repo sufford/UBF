@@ -992,6 +992,12 @@ static uiLayout *draw_modifier(
 		if (mti->isDisabled && mti->isDisabled(md, 0)) {
 			uiLayoutSetRedAlert(row, true);
 		}
+		else if (md->type == eModifierType_EditPoly &&
+		         (((EditPolyModifierData *)md)->flag & EDITPOLY_IN_EDITMODE))
+		{
+			/* Edit Poly: the modifier that is being edited is highlighted */
+			uiLayoutSetRedAlert(row, true);
+		}
 		uiItemR(row, &ptr, "name", 0, "", ICON_NONE);
 		uiLayoutSetRedAlert(row, false);
 

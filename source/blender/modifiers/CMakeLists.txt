@@ -116,6 +116,7 @@ set(SRC
 	intern/MOD_wavemax.c
 	intern/MOD_melt.c
 	intern/MOD_editpoly.c
+	intern/MOD_editpoly_ops.c
 	
 	MOD_modifiertypes.h
 	intern/MOD_noise.h

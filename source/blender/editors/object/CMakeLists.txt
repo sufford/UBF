@@ -61,6 +61,8 @@ set(SRC
 	object_vgroup.c
 	object_warp.c
 	object_editpoly.c
+	editpoly_mode.c
+	editpoly_record.c
 
 	object_intern.h
 )

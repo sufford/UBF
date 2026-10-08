@@ -46,6 +46,7 @@
 #include "BLO_runtime.h"
 
 #include "ED_gpencil.h"
+#include "ED_editpoly.h"
 #include "ED_render.h"
 #include "ED_screen.h"
 #include "ED_undo.h"
@@ -71,6 +72,16 @@ static CLG_LogRef LOG = {"ed.undo"};
 void ED_undo_push(bContext *C, const char *str)
 {
 	CLOG_INFO(&LOG, 1, "name='%s'", str);
+
+	/* Edit Poly modifier: an operator that changes geometry always pushes an
+	 * undo step, which is the moment its operation history has to be updated.
+	 * While the mode is active the step is swallowed: the object data is then
+	 * the temporary edit mesh, which is not part of the main database, and a
+	 * memfile step referencing it would restore an object without data. */
+	if (editpoly_record_undo_hook(str)) {
+		WM_file_tag_modified();
+		return;
+	}
 
 	const int steps = U.undosteps;
 
@@ -250,6 +261,12 @@ UndoStack *ED_undo_stack_get(void)
 
 static int ed_undo_exec(bContext *C, wmOperator *op)
 {
+	/* inside the Edit Poly edit mode the operation history is the undo stack */
+	if (editpoly_undo_session_step(C, true)) {
+		WM_event_add_mousemove(C);
+		return OPERATOR_FINISHED;
+	}
+
 	/* "last operator" should disappear, later we can tie this with undo stack nicer */
 	WM_operator_stack_clear(CTX_wm_manager(C));
 	int ret = ed_undo_step(C, 1, NULL, op->reports);
@@ -270,6 +287,11 @@ static int ed_undo_push_exec(bContext *C, wmOperator *op)
 
 static int ed_redo_exec(bContext *C, wmOperator *op)
 {
+	if (editpoly_undo_session_step(C, false)) {
+		WM_event_add_mousemove(C);
+		return OPERATOR_FINISHED;
+	}
+
 	int ret = ed_undo_step(C, -1, NULL, op->reports);
 	if (ret & OPERATOR_FINISHED) {
 		/* Keep button under the cursor active. */
@@ -515,6 +537,13 @@ static int undo_history_invoke(bContext *C, wmOperator *op, const wmEvent *UNUSE
 /* note: also check ed_undo_step() in top if you change notifiers */
 static int undo_history_exec(bContext *C, wmOperator *op)
 {
+	/* jumping to a native undo step would restore an object state from outside
+	 * the Edit Poly session, treat it as a plain undo of the modifier history */
+	if (editpoly_undo_session_step(C, true)) {
+		WM_event_add_mousemove(C);
+		return OPERATOR_FINISHED;
+	}
+
 	PropertyRNA *prop = RNA_struct_find_property(op->ptr, "item");
 	if (RNA_property_is_set(op->ptr, prop)) {
 		int item = RNA_property_int_get(op->ptr, prop);

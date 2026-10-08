@@ -79,11 +79,13 @@
 #include "BKE_modifier.h"
 #include "BKE_editlattice.h"
 #include "BKE_editmesh.h"
+#include "BKE_editpoly.h"
 #include "BKE_report.h"
 #include "BKE_undo_system.h"
 
 #include "ED_armature.h"
 #include "ED_curve.h"
+#include "ED_editpoly.h"
 #include "ED_mesh.h"
 #include "ED_mball.h"
 #include "ED_lattice.h"
@@ -454,6 +456,12 @@ bool ED_object_editmode_exit_ex(Main *bmain, Scene *scene, Object *obedit, int f
 
 	if (flag & EM_WAITCURSOR) waitcursor(1);
 
+	/* Edit Poly: the operations of the user are recorded while the bmesh of the
+	 * edit mesh still exists, it is freed by the editmode load below. */
+	if (editpoly_object_is_in_editmode(obedit)) {
+		editpoly_record_sync(obedit, NULL);
+	}
+
 	if (ED_object_editmode_load_ex(bmain, obedit, freedata) == false) {
 		/* in rare cases (background mode) its possible active object
 		 * is flagged for editmode, without 'obedit' being set [#35489] */
@@ -461,6 +469,13 @@ bool ED_object_editmode_exit_ex(Main *bmain, Scene *scene, Object *obedit, int f
 			scene->basact->object->mode &= ~OB_MODE_EDIT;
 		}
 		if (flag & EM_WAITCURSOR) waitcursor(0);
+
+		/* Edit Poly: put the original object data back even when the native
+		 * editmode data was missing. */
+		if (editpoly_object_is_in_editmode(obedit)) {
+			editpoly_mode_cleanup(bmain, scene, obedit);
+		}
+
 		return true;
 	}
 
@@ -493,6 +508,12 @@ bool ED_object_editmode_exit_ex(Main *bmain, Scene *scene, Object *obedit, int f
 	}
 
 	if (flag & EM_WAITCURSOR) waitcursor(0);
+
+	/* Edit Poly: the edited mesh was a temporary datablock owned by the
+	 * modifier, restore the real object data and drop the runtime state. */
+	if (editpoly_object_is_in_editmode(obedit)) {
+		editpoly_mode_cleanup(bmain, scene, obedit);
+	}
 
 	return (obedit->mode & OB_MODE_EDIT) == 0;
 }

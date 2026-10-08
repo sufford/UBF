@@ -24,7 +24,9 @@
 #ifndef __OBJECT_INTERN_H__
 #define __OBJECT_INTERN_H__
 
+struct Main;
 struct Object;
+struct Scene;
 struct StructRNA;
 struct bContext;
 struct wmOperator;
@@ -268,5 +270,12 @@ void OBJECT_OT_datalayout_transfer(struct wmOperatorType *ot);
 
 /* edit poly */
 void OBJECT_OT_editpoly_reset(struct wmOperatorType *ot);
+void OBJECT_OT_editpoly_enter(struct wmOperatorType *ot);
+void OBJECT_OT_editpoly_exit(struct wmOperatorType *ot);
+void OBJECT_OT_editpoly_toggle(struct wmOperatorType *ot);
+void OBJECT_OT_editpoly_set_active(struct wmOperatorType *ot);
+
+/* editpoly_mode.c */
+void editpoly_mode_cleanup(struct Main *bmain, struct Scene *scene, struct Object *ob);
 
 #endif /* __OBJECT_INTERN_H__ */

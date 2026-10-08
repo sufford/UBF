@@ -1823,22 +1823,131 @@ typedef struct DeleteMeshModifierData {
     ModifierData modifier;
 } DeleteMeshModifierData;
 
+/** Одна запись истории операций Edit Poly.
+ *  Финальная геометрия не хранится: только параметры операции (сдвиги вершин)
+ *  и описание изменения топологии в виде ссылок на элементы по их id.
+ *
+ *  Все *_ids ссылаются на "editpoly_id" элементов (см. editpoly_record.c),
+ *  то есть на элементы меша, каким он был ДО этой операции. */
+typedef struct EditPolyOp {
+    struct EditPolyOp *next, *prev;
+
+    int type;               /* EDITPOLY_OP_* */
+    int flag;               /* EDITPOLY_OP_FLAG_* */
+
+    /** Имя инструмента для UI. */
+    char name[32];
+
+    /* Параметры операции (общий набор, используют нужные поля). */
+    float offset[3];        /* EDITPOLY_OP_MOVE */
+    float pad0;             /* alignment */
+    float matrix[4][4];     /* EDITPOLY_OP_ROTATE / SCALE / TRANSFORM */
+    int pad1;               /* alignment */
+    int pad2;
+
+    /* --- преобразование вершин --- */
+    int *vert_ids;          /* id вершин, к которым применяется преобразование */
+    int vert_count;
+    int pad3;
+    float (*vert_deltas)[3];/* vert_count сдвигов, NULL если хватает offset */
+    float bevel_width;      /* EDITPOLY_OP_BEVEL (пока не используется) */
+    int bevel_segments;     /* EDITPOLY_OP_BEVEL (пока не используется) */
+
+    /* --- топология: удаляемые элементы --- */
+    int *kill_vert_ids;
+    int kill_vert_count;
+    int pad4;
+    int *kill_edge_ids;
+    int kill_edge_count;
+    int pad5;
+    int *kill_face_ids;
+    int kill_face_count;
+    int pad6;
+
+    /* --- топология: новые вершины --- */
+    int *new_vert_ids;
+    int new_vert_count;
+    int pad7;
+    float (*new_vert_co)[3];
+    int *new_vert_srcs;     /* id вершины-источника атрибутов (0 = нет) */
+
+    /* --- топология: новые рёбра --- */
+    int *new_edge_ids;
+    int new_edge_count;
+    int pad8;
+    int (*new_edge_verts)[2];   /* new_edge_count пар id вершин */
+    int *new_edge_srcs;         /* id ребра-источника атрибутов (0 = нет) */
+
+    /* --- топология: новые полигоны --- */
+    int *new_face_ids;
+    int new_face_count;
+    int pad9;
+    int *new_face_offsets;  /* new_face_count + 1 смещений в new_loop_verts */
+    int *new_loop_verts;    /* id вершин петель */
+    int new_loop_count;
+    int pad10;
+    int *new_face_srcs;     /* id полигона-источника атрибутов (0 = нет) */
+    short *new_face_mats;   /* material index новых полигонов */
+
+    /* --- материал существующих полигонов --- */
+    int *mat_face_ids;
+    int mat_face_count;
+    int pad11;
+    short *mat_values;
+} EditPolyOp;
+
 typedef struct EditPolyModifierData {
     ModifierData modifier;
 
-    /** Собственная геометрия модификатора (пока NULL — заполним позже). */
-    struct Mesh *edit_mesh;
+    /** История операций — единственный источник правды, сохраняется в .blend.
+     *  Вычисленная геометрия (edit_mesh) в DNA не хранится, она runtime-only. */
+    ListBase ops;
 
-    /** Флаги состояния. */
+    /** Флаги состояния (EDITPOLY_*). */
     int flag;
     int pad;
+
+    /** Топология входа (результата модификаторов НАД Edit Poly), на которой была
+     *  записана история. Если текущий вход отличается, история ссылается на
+     *  другие элементы и результат искажается — показываем предупреждение
+     *  (EDITPOLY_INPUT_MISMATCH). 0 = сигнатура ещё не записана (истории нет). */
+    int input_vert_count;
+    int input_edge_count;
+    int input_face_count;
+    int input_pad;
 } EditPolyModifierData;
+
+/* EditPolyOp.type */
+enum {
+    EDITPOLY_OP_NONE = 0,
+    EDITPOLY_OP_EXTRUDE = 1,
+    EDITPOLY_OP_MOVE,
+    EDITPOLY_OP_ROTATE,
+    EDITPOLY_OP_SCALE,
+    EDITPOLY_OP_BEVEL,
+    EDITPOLY_OP_DELETE,
+    EDITPOLY_OP_PATCH,      /* прочее изменение топологии */
+};
+
+/* EditPolyOp.flag */
+enum {
+    /* Операция меняет топологию: применяется блок полей с новыми элементами. */
+    EDITPOLY_OP_FLAG_TOPOLOGY = (1 << 0),
+    /* Операция отменена (Ctrl+Z) и ждёт возврата (Ctrl+Shift+Z). Применение
+     * истории её пропускает, счётчик операций её не считает. */
+    EDITPOLY_OP_FLAG_SKIPPED = (1 << 1),
+};
 
 /* EditPolyModifierData.flag */
 enum {
-    EDITPOLY_EDIT_MODE   = (1 << 0),
-    EDITPOLY_CACHE_VALID = (1 << 1),
-    EDITPOLY_INITIALIZED = (1 << 2),
+    EDITPOLY_HAS_OPS     = (1 << 0),
+    EDITPOLY_IN_EDITMODE = (1 << 1),
+    EDITPOLY_DIRTY       = (1 << 2),
+    /* Помечает модификатор, с которым работает Edit Mode (активен только один). */
+    EDITPOLY_ACTIVE      = (1 << 3),
+    /* Топология входа изменилась после записи истории: результат искажается.
+     * Ставится при вычислении, показывается в панели модификатора. */
+    EDITPOLY_INPUT_MISMATCH = (1 << 4),
 };
 
 #endif  /* __DNA_MODIFIER_TYPES_H__ */

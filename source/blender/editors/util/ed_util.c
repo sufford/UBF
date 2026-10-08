@@ -45,6 +45,7 @@
 #include "BLT_translation.h"
 
 #include "BKE_context.h"
+#include "BKE_editpoly.h"
 #include "BKE_global.h"
 #include "BKE_main.h"
 #include "BKE_multires.h"
@@ -61,6 +62,7 @@
 #include "ED_object.h"
 #include "ED_outliner.h"
 #include "ED_paint.h"
+#include "ED_editpoly.h"
 #include "ED_space_api.h"
 #include "ED_util.h"
 
@@ -159,6 +161,12 @@ void ED_editors_exit(bContext *C)
 	/* global in meshtools... */
 	ED_mesh_mirror_spatial_table(NULL, NULL, NULL, NULL, 'e');
 	ED_mesh_mirror_topo_table(NULL, NULL, 'e');
+
+	/* Edit Poly: Blender is quitting while the mode is still active, so the
+	 * regular mode cleanup never runs. The temporary edit meshes and the
+	 * recorder snapshots are not owned by any bmain and would leak. */
+	editpoly_record_free_all();
+	editpoly_runtime_free_all();
 }
 
 /* flush any temp data from object editing to DNA before writing files,

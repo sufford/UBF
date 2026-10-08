@@ -5157,6 +5157,56 @@ static void direct_link_pose(FileData *fd, bPose *pose)
 	}
 }
 
+/** Relink the arrays of one operation of the Edit Poly history.
+ *
+ *  The arrays are saved as plain data without DNA, so they need the endian switch
+ *  as well; the struct itself (type, counts, deltas...) is switched by the DNA
+ *  reader. */
+static void direct_link_editpoly_op(FileData *fd, void *data)
+{
+	EditPolyOp *op = data;
+
+	op->vert_ids = newdataadr(fd, op->vert_ids);
+	op->vert_deltas = newdataadr(fd, op->vert_deltas);
+	op->kill_vert_ids = newdataadr(fd, op->kill_vert_ids);
+	op->kill_edge_ids = newdataadr(fd, op->kill_edge_ids);
+	op->kill_face_ids = newdataadr(fd, op->kill_face_ids);
+	op->new_vert_ids = newdataadr(fd, op->new_vert_ids);
+	op->new_vert_co = newdataadr(fd, op->new_vert_co);
+	op->new_vert_srcs = newdataadr(fd, op->new_vert_srcs);
+	op->new_edge_ids = newdataadr(fd, op->new_edge_ids);
+	op->new_edge_verts = newdataadr(fd, op->new_edge_verts);
+	op->new_edge_srcs = newdataadr(fd, op->new_edge_srcs);
+	op->new_face_ids = newdataadr(fd, op->new_face_ids);
+	op->new_face_offsets = newdataadr(fd, op->new_face_offsets);
+	op->new_loop_verts = newdataadr(fd, op->new_loop_verts);
+	op->new_face_srcs = newdataadr(fd, op->new_face_srcs);
+	op->new_face_mats = newdataadr(fd, op->new_face_mats);
+	op->mat_face_ids = newdataadr(fd, op->mat_face_ids);
+	op->mat_values = newdataadr(fd, op->mat_values);
+
+	if (fd->flags & FD_FLAGS_SWITCH_ENDIAN) {
+		BLI_endian_switch_int32_array(op->vert_ids, op->vert_count);
+		BLI_endian_switch_float_array((float *)op->vert_deltas, op->vert_count * 3);
+		BLI_endian_switch_int32_array(op->kill_vert_ids, op->kill_vert_count);
+		BLI_endian_switch_int32_array(op->kill_edge_ids, op->kill_edge_count);
+		BLI_endian_switch_int32_array(op->kill_face_ids, op->kill_face_count);
+		BLI_endian_switch_int32_array(op->new_vert_ids, op->new_vert_count);
+		BLI_endian_switch_float_array((float *)op->new_vert_co, op->new_vert_count * 3);
+		BLI_endian_switch_int32_array(op->new_vert_srcs, op->new_vert_count);
+		BLI_endian_switch_int32_array(op->new_edge_ids, op->new_edge_count);
+		BLI_endian_switch_int32_array((int *)op->new_edge_verts, op->new_edge_count * 2);
+		BLI_endian_switch_int32_array(op->new_edge_srcs, op->new_edge_count);
+		BLI_endian_switch_int32_array(op->new_face_ids, op->new_face_count);
+		BLI_endian_switch_int32_array(op->new_face_offsets, op->new_face_count + 1);
+		BLI_endian_switch_int32_array(op->new_loop_verts, op->new_loop_count);
+		BLI_endian_switch_int32_array(op->new_face_srcs, op->new_face_count);
+		BLI_endian_switch_int16_array(op->new_face_mats, op->new_face_count);
+		BLI_endian_switch_int32_array(op->mat_face_ids, op->mat_face_count);
+		BLI_endian_switch_int16_array(op->mat_values, op->mat_face_count);
+	}
+}
+
 static void direct_link_modifiers(FileData *fd, ListBase *lb)
 {
 	ModifierData *md;
@@ -5212,6 +5262,29 @@ static void direct_link_modifiers(FileData *fd, ListBase *lb)
 			if (amd->circle_axis < 0 || amd->circle_axis > 2) {
 				amd->circle_axis = 2;
 			}
+		}
+		else if (md->type == eModifierType_EditPoly) {
+			EditPolyModifierData *epmd = (EditPolyModifierData *)md;
+
+			/* Runtime state is never saved in a file. */
+			epmd->flag &= ~EDITPOLY_IN_EDITMODE;
+
+			/* The operation history is written after the modifier itself, one
+			 * EditPolyOp struct plus its arrays per operation. The nodes are linked
+			 * back by the addresses stored in the file, so a file written before the
+			 * history was serialized has no matching blocks and ends up with an
+			 * empty history instead of dangling pointers. */
+			link_list_ex(fd, &epmd->ops, direct_link_editpoly_op);
+
+			/* The state flags are derived from the history, never trust them. */
+			if (epmd->ops.first != NULL) {
+				epmd->flag |= EDITPOLY_HAS_OPS;
+			}
+			else {
+				epmd->flag &= ~EDITPOLY_HAS_OPS;
+			}
+
+			epmd->flag &= ~EDITPOLY_DIRTY;
 		}
 		else if (md->type == eModifierType_Cloth) {
 			ClothModifierData *clmd = (ClothModifierData *)md;

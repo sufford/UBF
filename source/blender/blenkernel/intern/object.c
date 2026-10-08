@@ -90,6 +90,7 @@
 #include "BKE_linestyle.h"
 #include "BKE_mesh.h"
 #include "BKE_editmesh.h"
+#include "BKE_editpoly.h"
 #include "BKE_mball.h"
 #include "BKE_modifier.h"
 #include "BKE_multires.h"
@@ -400,6 +401,10 @@ void BKE_object_free_caches(Object *object)
 /** Free (or release) any data used by this object (does not free the object itself). */
 void BKE_object_free(Object *ob)
 {
+	/* An Edit Poly session keeps a temporary mesh outside the main database: the
+	 * object is going away, so the session cannot survive it. */
+	editpoly_runtime_object_free(ob);
+
 	BKE_animdata_free((ID *)ob, false);
 
 	/* BKE_<id>_free shall never touch to ID->us. Never ever. */

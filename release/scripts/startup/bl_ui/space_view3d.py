@@ -24,6 +24,7 @@ from bl_ui.properties_grease_pencil_common import (
         GreasePencilPaletteColorPanel,
         )
 from bl_ui.properties_paint_common import UnifiedPaintPanel
+from bl_ui.properties_data_modifier import editpoly_header_row
 from bpy.app.translations import contexts as i18n_contexts
 
 
@@ -81,6 +82,10 @@ class VIEW3D_HT_header(Header):
                 row.prop(toolsettings, "proportional_edit", icon_only=True)
                 if toolsettings.proportional_edit != 'DISABLED':
                     row.prop(toolsettings, "proportional_edit_falloff", icon_only=True)
+
+        # Edit Poly: choose which object / Edit Poly modifier the edit mode works on
+        if obj and obj.type == 'MESH' and obj.mode in {'OBJECT', 'EDIT'}:
+            editpoly_header_row(layout, context)
 
         # Snap
         show_snap = False

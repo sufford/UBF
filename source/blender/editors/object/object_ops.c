@@ -246,6 +246,10 @@ void ED_operatortypes_object(void)
 	WM_operatortype_append(OBJECT_OT_surfacedeform_bind);
 	
 	WM_operatortype_append(OBJECT_OT_editpoly_reset);
+	WM_operatortype_append(OBJECT_OT_editpoly_enter);
+	WM_operatortype_append(OBJECT_OT_editpoly_exit);
+	WM_operatortype_append(OBJECT_OT_editpoly_toggle);
+	WM_operatortype_append(OBJECT_OT_editpoly_set_active);
 }
 
 void ED_operatormacros_object(void)

@@ -18,7 +18,7 @@
 
 # <pep8 compliant>
 import bpy
-from bpy.types import Panel
+from bpy.types import Panel, Menu
 from bpy.app.translations import pgettext_iface as iface_
 
 
@@ -1746,9 +1746,150 @@ class DATA_PT_modifiers(ModifierButtonsPanel, Panel):
         if md.rest_source == 'BIND':
             layout.operator("object.correctivesmooth_bind", text="Unbind" if is_bind else "Bind")
 
+    def EDIT_POLY(self, layout, ob, md):
+        # Which Edit Poly mesh is being edited (only shown with several ones)
+        editpoly_selector_row(layout, ob)
+
+        row = layout.row()
+        col = row.column(align=True)
+
+        if md.in_editmode:
+            col.operator("object.editpoly_exit", text="Exit Edit Poly Mode", icon='OBJECT_DATAMODE')
+        else:
+            col.operator("object.editpoly_enter", text="Edit Poly Mode", icon='EDITMODE_HLT')
+
+        col.operator("object.editpoly_reset", text="Clear History", icon='TRASH')
+
+        if md.input_mismatch:
+            box = layout.box()
+            col = box.column(align=True)
+            col.alert = True
+            col.label(text="History does not match the input:", icon='ERROR')
+            col.label(text="a modifier above Edit Poly changed the geometry.")
+            col.label(text="Fix the modifier order or clear the history.")
+
+        layout.label(text="Operations in history: %d" % md.op_count)
+
+
+def editpoly_modifiers(ob):
+    """All Edit Poly modifiers of an object."""
+    if ob is None:
+        return []
+    return [md for md in ob.modifiers if md.type == 'EDIT_POLY']
+
+
+def editpoly_active_index(ob):
+    """Index of the Edit Poly modifier the edit mode works on (0 by default)."""
+    for i, md in enumerate(editpoly_modifiers(ob)):
+        if md.is_active:
+            return i
+    return 0
+
+
+def editpoly_label(ob):
+    return "Edit poly mesh %d" % (editpoly_active_index(ob) + 1)
+
+
+def editpoly_selected_objects(context):
+    """Selected mesh objects that have an Edit Poly (the active one included)."""
+    items = []
+    seen = set()
+
+    for ob in context.selected_objects:
+        if ob is None or ob.type != 'MESH' or ob.name in seen:
+            continue
+        if editpoly_modifiers(ob):
+            seen.add(ob.name)
+            items.append(ob)
+
+    ob_active = context.object
+    if ob_active is not None and ob_active.type == 'MESH' and ob_active.name not in seen:
+        if editpoly_modifiers(ob_active):
+            items.append(ob_active)
+
+    return items
+
+
+def editpoly_header_label(context):
+    """Text of the header list: the object and the Edit Poly being edited."""
+    ob = context.object
+
+    if ob is None or ob.type != 'MESH' or not editpoly_modifiers(ob):
+        return ""
+
+    if len(editpoly_selected_objects(context)) > 1:
+        return "%s: %s" % (ob.name, editpoly_label(ob))
+
+    return editpoly_label(ob)
+
+
+def editpoly_menu_item(layout, ob, index, active, text):
+    icon = 'CHECKBOX_HLT' if active else 'CHECKBOX_DEHLT'
+    props = layout.operator("object.editpoly_set_active", text=text, icon=icon)
+    props.object = ob.name
+    props.index = index
+
+
+def editpoly_selector_row(layout, ob):
+    """Row with the Edit Poly mesh selector (hidden while there is only one)."""
+    if len(editpoly_modifiers(ob)) > 1:
+        row = layout.row(align=True)
+        row.menu("OBJECT_MT_editpoly_mesh_select", text=editpoly_label(ob))
+
+
+def editpoly_header_row(layout, context):
+    """Header list: every selected object with an Edit Poly (Spec 8.2)."""
+    ob = context.object
+
+    if ob is None or ob.type != 'MESH' or not editpoly_modifiers(ob):
+        return
+
+    items = editpoly_selected_objects(context)
+
+    if len(items) < 2 and len(editpoly_modifiers(ob)) < 2:
+        return
+
+    row = layout.row(align=True)
+    row.menu("OBJECT_MT_editpoly_mesh_select", text=editpoly_header_label(context))
+
+
+def editpoly_mesh_menu_draw(layout, ob):
+    """The entries of the selector: "Edit poly mesh 1", "Edit poly mesh 2", ..."""
+    mods = editpoly_modifiers(ob)
+    active = editpoly_active_index(ob)
+
+    for i in range(len(mods)):
+        editpoly_menu_item(layout, ob, i, i == active, "Edit poly mesh %d" % (i + 1))
+
+
+def editpoly_object_menu_draw(layout, context):
+    """Header entries: the Edit Poly modifiers of every selected object."""
+    items = editpoly_selected_objects(context)
+    ob_active = context.object
+
+    for ob in items:
+        mods = editpoly_modifiers(ob)
+        active = editpoly_active_index(ob)
+
+        for i in range(len(mods)):
+            if len(items) > 1:
+                text = "%s: Edit poly mesh %d" % (ob.name, i + 1)
+            else:
+                text = "Edit poly mesh %d" % (i + 1)
+
+            editpoly_menu_item(layout, ob, i, ob is ob_active and i == active, text)
+
+
+class OBJECT_MT_editpoly_mesh_select(Menu):
+    bl_label = "Edit Poly Mesh"
+
+    def draw(self, context):
+        editpoly_object_menu_draw(self.layout, context)
+
 
 classes = (
     DATA_PT_modifiers,
+    OBJECT_MT_editpoly_mesh_select,
 )
 
 if __name__ == "__main__":  # only for live edit.

@@ -124,6 +124,9 @@ ModifierData *ED_object_modifier_add(ReportList *reports, Main *bmain, Scene *sc
 			BLI_insertlinkbefore(&ob->modifiers, md, new_md);
 		}
 		else
+			/* new modifiers are added at the bottom of the stack, as in stock
+			 * Blender: the ones already there (e.g. an Edit Poly added first) stay
+			 * above and keep working on the base geometry. */
 			BLI_addtail(&ob->modifiers, new_md);
 
 		if (name) {

@@ -117,6 +117,7 @@
 #include "GPU_init_exit.h"
 
 #include "BKE_depsgraph.h"
+#include "BKE_editpoly.h"
 #include "BKE_sound.h"
 #include "COM_compositor.h"
 
@@ -475,7 +476,9 @@ void WM_exit_ext(bContext *C, const bool do_python)
 
 		if (!G.background) {
 			struct MemFile *undo_memfile = wm->undo_stack ? ED_undosys_stack_memfile_get_active(wm->undo_stack) : NULL;
-			if ((U.uiflag2 & USER_KEEP_SESSION) || (undo_memfile != NULL)) {
+			if (((U.uiflag2 & USER_KEEP_SESSION) || (undo_memfile != NULL)) &&
+			    (editpoly_session_active() == false))
+			{
 				/* save the undo state as quit.blend */
 				char filename[FILE_MAX];
 				bool has_edited;

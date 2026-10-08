@@ -438,6 +438,8 @@ static StructRNA *rna_Modifier_refine(struct PointerRNA *ptr)
 			return &RNA_WaveMaxModifier;
 		case eModifierType_Melt:
 			return &RNA_MeltModifier;
+		case eModifierType_EditPoly:
+			return &RNA_EditPolyModifier;
 		/* Default */
 		case eModifierType_None:
 		case eModifierType_ShapeKey:
@@ -1199,6 +1201,47 @@ static void rna_ParticleInstanceModifier_particle_system_set(PointerRNA *ptr, co
 
 	psmd->psys = BLI_findindex(&psmd->ob->particlesystem, value.data) + 1;
 	CLAMP_MIN(psmd->psys, 1);
+}
+
+/* Note: the getters are referenced by name, the generated rna_modifier_gen.c
+ * includes this file, so they must be static and take a single PointerRNA. */
+static int rna_EditPolyModifier_op_count_get(PointerRNA *ptr)
+{
+	EditPolyModifierData *epmd = (EditPolyModifierData *)ptr->data;
+	EditPolyOp *op;
+	int count = 0;
+
+	for (op = epmd->ops.first; op; op = op->next) {
+		/* undone operations (kept for redo) are not part of the history */
+		if (op->flag & EDITPOLY_OP_FLAG_SKIPPED) {
+			continue;
+		}
+
+		count++;
+	}
+
+	return count;
+}
+
+static bool rna_EditPolyModifier_in_editmode_get(PointerRNA *ptr)
+{
+	EditPolyModifierData *epmd = (EditPolyModifierData *)ptr->data;
+
+	return (epmd->flag & EDITPOLY_IN_EDITMODE) != 0;
+}
+
+static bool rna_EditPolyModifier_is_active_get(PointerRNA *ptr)
+{
+	EditPolyModifierData *epmd = (EditPolyModifierData *)ptr->data;
+
+	return (epmd->flag & EDITPOLY_ACTIVE) != 0;
+}
+
+static bool rna_EditPolyModifier_input_mismatch_get(PointerRNA *ptr)
+{
+	EditPolyModifierData *epmd = (EditPolyModifierData *)ptr->data;
+
+	return (epmd->flag & EDITPOLY_INPUT_MISMATCH) != 0;
 }
 
 #else
@@ -5518,12 +5561,35 @@ static void rna_def_modifier_melt(BlenderRNA *brna)
 static void rna_def_modifier_editpoly(BlenderRNA *brna)
 {
     StructRNA *srna;
+    PropertyRNA *prop;
 
     srna = RNA_def_struct(brna, "EditPolyModifier", "Modifier");
     RNA_def_struct_ui_text(srna, "Edit Poly Modifier",
                            "Non-destructive Edit Poly modifier (3ds Max style)");
     RNA_def_struct_sdna(srna, "EditPolyModifierData");
     RNA_def_struct_ui_icon(srna, ICON_MESH_DATA);
+
+    prop = RNA_def_property(srna, "op_count", PROP_INT, PROP_NONE);
+    RNA_def_property_int_funcs(prop, "rna_EditPolyModifier_op_count_get", NULL, NULL);
+    RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+    RNA_def_property_ui_text(prop, "Operations", "Number of operations stored in the history");
+
+    prop = RNA_def_property(srna, "in_editmode", PROP_BOOLEAN, PROP_NONE);
+    RNA_def_property_boolean_funcs(prop, "rna_EditPolyModifier_in_editmode_get", NULL);
+    RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+    RNA_def_property_ui_text(prop, "Edit Mode", "This Edit Poly modifier is currently being edited");
+
+    prop = RNA_def_property(srna, "is_active", PROP_BOOLEAN, PROP_NONE);
+    RNA_def_property_boolean_funcs(prop, "rna_EditPolyModifier_is_active_get", NULL);
+    RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+    RNA_def_property_ui_text(prop, "Active", "The Edit Poly modifier the edit mode works on");
+
+    prop = RNA_def_property(srna, "input_mismatch", PROP_BOOLEAN, PROP_NONE);
+    RNA_def_property_boolean_funcs(prop, "rna_EditPolyModifier_input_mismatch_get", NULL);
+    RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+    RNA_def_property_ui_text(prop, "Input Mismatch",
+                             "The modifiers above Edit Poly changed the input after the "
+                             "history was recorded, so the result is wrong");
 }
 
 
