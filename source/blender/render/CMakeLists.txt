@@ -32,6 +32,7 @@ set(INC
 	../blentranslation
 	../imbuf
 	../depsgraph
+	../gpu
 	../makesdna
 	../makesrna
 	../nodes
@@ -39,11 +40,12 @@ set(INC
 	../../../intern/atomic
 	../../../intern/guardedalloc
 	../../../intern/mikktspace
+	../../../intern/glew-mx
 	../../../intern/smoke/extern
 )
 
 set(INC_SYS
-
+	${GLEW_INCLUDE_PATH}
 )
 
 set(SRC
@@ -93,6 +95,7 @@ set(SRC
 	intern/source/RE_Filler.c
 	intern/source/RE_Mirror.c
 	intern/source/RE_Prof.c
+	intern/source/RE_GPURenderer.c
 
 	extern/include/RE_bake.h
 	extern/include/RE_engine.h
@@ -125,6 +128,7 @@ set(SRC
 	intern/include/volumetric.h
 	intern/include/voxeldata.h
 	intern/include/zbuf.h
+	intern/source/RE_GPURenderer.h
 	intern/raytrace/bvh.h
 	intern/raytrace/rayobject_hint.h
 	intern/raytrace/rayobject_internal.h
@@ -192,3 +196,7 @@ if(APPLE)
 endif()
 
 blender_add_lib_nolist(bf_render "${SRC}" "${INC}" "${INC_SYS}")
+
+# ★ UBF: GPU-деферред растеризатор (mini-EEVEE, этап M1) использует GPU-модуль
+# (шейдеры, FBO, текстуры). bf_gpu не зависит от bf_render — циклов нет.
+target_link_libraries(bf_render bf_gpu)

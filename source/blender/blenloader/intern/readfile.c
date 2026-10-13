@@ -8705,6 +8705,23 @@ static void do_versions_after_linking(Main *main)
 //	printf("%s for %s (%s), %d.%d\n", __func__, main->curlib ? main->curlib->name : main->name,
 //	       main->curlib ? "LIB" : "MAIN", main->versionfile, main->subversionfile);
 
+	/* ★ Форк (раунд 26): режим растеризатора FAST снят — он больше не выбирается
+	 * в UI (rna_scene.c) и недостижим в рантайме (предикат RE_shader_fast()
+	 * удалён). Но его число 4 могло сохраниться в старом .blend: без этой правки
+	 * RNA показала бы пустой пункт списка, а рендер ушёл бы в снятый путь.
+	 * Переводим в OFF (встроенный BI). Идёт ДО версионирования по номеру версии
+	 * файла, чтобы сработать для файлов любой давности.
+	 * RE_RASTERIZER_FAST_RETIRED — то самое зарезервированное число 4; это
+	 * единственное место, которому разрешено на него ссылаться. */
+	{
+		Scene *sce;
+		for (sce = main->scene.first; sce; sce = sce->id.next) {
+			if (sce->r.rasterizer_mode == RE_RASTERIZER_FAST_RETIRED) {
+				sce->r.rasterizer_mode = RE_RASTERIZER_OFF;
+			}
+		}
+	}
+
 	do_versions_after_linking_270(main);
 }
 

@@ -848,8 +848,9 @@ static void atm_tile(RenderPart *pa, RenderLayer *rl)
  * каждого затенённого пикселя, включая незеркальные; дорогие pos/nrm/view сам
  * store() пишет только при i > 0 (RE_Rasterizer.c).
  *
- * Выключатель UBF_BI_SSR (по умолчанию ВЫКЛ) и RE_shader_fast() — двойная
- * защита: у быстрого пути свой выключатель и свой источник данных. */
+ * Выключатель UBF_BI_SSR (по умолчанию ВЫКЛ). Раньше здесь стояла вторая защита
+ * RE_shader_fast() — у снятого быстрого пути был свой источник данных; быстрый
+ * путь снят (раунд 26), защита удалена. */
 static void bi_ssr_store_pixel(ShadeSample *ssamp, int x, int y)
 {
 	ShadeInput *shi;
@@ -857,7 +858,6 @@ static void bi_ssr_store_pixel(ShadeSample *ssamp, int x, int y)
 	float i = 0.0f;
 
 	if (!RE_bi_ssr_enabled()) return;
-	if (RE_shader_fast()) return;
 	if (ssamp->tot <= 0) return;
 
 	shi = &ssamp->shi[0];

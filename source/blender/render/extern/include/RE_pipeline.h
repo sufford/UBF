@@ -328,6 +328,17 @@ void RE_draw_lock_cb		(struct Render *re, void *handle, void (*f)(void *handle, 
 void RE_test_break_cb	(struct Render *re, void *handle, int (*f)(void *handle));
 void RE_current_scene_update_cb(struct Render *re, void *handle, void (*f)(void *handle, struct Scene *scene));
 
+/* ★ GPU deferred rasterizer (custom fork, mini-EEVEE).
+ * Двухфазная модель: джоба собирает CPU-массивы (RE_gpu_renderer_build_render),
+ * главный поток во вьюпорте рисует G-буфер. Эти функции — точка входа для
+ * колбэка view_draw (render_internal.c) и освобождения. */
+bool RE_gpu_renderer_is_active(struct Render *re);
+void RE_gpu_renderer_draw_render(struct Render *re, int width, int height);
+void RE_gpu_renderer_free_render(struct Render *re);
+/* ★ Пометить GPU-сцену устаревшей — вызывается сразу после пересборки базы
+ * рендера (RE_Database_FromScene), чтобы вьюпорт подхватил правки геометрии. */
+void RE_gpu_renderer_invalidate(struct Render *re);
+
 /* should move to kernel once... still unsure on how/where */
 float RE_filter_value(int type, float x);
 

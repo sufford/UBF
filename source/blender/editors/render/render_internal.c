@@ -116,6 +116,10 @@ typedef struct RenderJob {
 	ColorManagedDisplaySettings display_settings;
 	bool supports_glsl_draw;
 	bool interface_locked;
+	/* ★ GPU-растеризатор: кадр уже отрисован синхронно в exec (на главном
+	 * потоке, где есть GL-контекст). Рендер-джоба в этом случае только
+	 * завершает работу и НЕ перерисовывает кадр. */
+	bool gpu_done;
 } RenderJob;
 
 /* called inside thread! */
@@ -282,6 +286,65 @@ static void screen_render_scene_layer_set(wmOperator *op, Main *mainp, Scene **s
 	}
 }
 
+/* ★★★ Раунд 83: выбор камеры для F12 больше НЕ зависит от положения курсора.
+ *
+ * F12 и Ctrl+F12 привязаны в SCREEN-keymap с use_viewport=true
+ * (screen_ops.c:4676-4681), а CTX_wm_view3d() отдаёт вьюпорт ПОД КУРСОРОМ.
+ * Стоило увести мышь из 3D-вьюпорта (в Image Editor, Timeline, Properties —
+ * куда угодно) — и v3d==NULL: use_viewport молча игнорировался,
+ * camera_override тоже NULL, и кадр считался по scene->camera.
+ *
+ * На mapFull это ровно то, на что жаловался пользователь: вьюпорт стоит в виде
+ * камеры Camera.009, а scene->camera = Camera.011 (Camera.012 — первая камера в
+ * списке объектов, её же вернул бы BKE_scene_camera_find), и F12 выдавал чужой
+ * ракурс. «Лечилось» шевелением мыши в вьюпорте (панорамой) — то есть просто
+ * тем, что курсор возвращался в 3D-вьюпорт.
+ *
+ * Делаем выбор детерминированным: если под курсором вьюпорта нет, ищем его в
+ * текущем экране. Приоритет — вьюпорт, стоящий в ВИДЕ КАМЕРЫ (RV3D_CAMOB):
+ * именно в нём пользователь «находится», и именно его ракурс он ожидает
+ * увидеть в результате. */
+static View3D *screen_render_view3d_get(const bContext *C)
+{
+	View3D *v3d;
+	bScreen *screen;
+	ScrArea *sa;
+	View3D *fallback = NULL;
+
+	v3d = CTX_wm_view3d(C);
+	if (v3d)
+		return v3d;
+
+	screen = CTX_wm_screen(C);
+	if (screen == NULL)
+		return NULL;
+
+	for (sa = screen->areabase.first; sa; sa = sa->next) {
+		SpaceLink *sl;
+
+		for (sl = sa->spacedata.first; sl; sl = sl->next) {
+			View3D *v;
+
+			if (sl->spacetype != SPACE_VIEW3D)
+				continue;
+
+			v = (View3D *)sl;
+			if (fallback == NULL)
+				fallback = v;
+
+			if (v->camera) {
+				ARegion *ar = BKE_area_find_region_type(sa, RGN_TYPE_WINDOW);
+				RegionView3D *rv3d = ar ? ar->regiondata : NULL;
+
+				if (rv3d && rv3d->persp == RV3D_CAMOB)
+					return v;
+			}
+		}
+	}
+
+	return fallback;
+}
+
 /* executes blocking render */
 static int screen_render_exec(bContext *C, wmOperator *op)
 {
@@ -289,7 +352,7 @@ static int screen_render_exec(bContext *C, wmOperator *op)
 	SceneRenderLayer *srl = NULL;
 	Render *re;
 	Image *ima;
-	View3D *v3d = CTX_wm_view3d(C);
+	View3D *v3d = screen_render_view3d_get(C);
 	Main *mainp = CTX_data_main(C);
 	unsigned int lay_override;
 	const bool is_animation = RNA_boolean_get(op->ptr, "animation");
@@ -597,6 +660,15 @@ static void render_startjob(void *rjv, short *stop, short *do_update, float *pro
 
 	RE_SetReports(rj->re, rj->reports);
 
+	/* ★ GPU-растеризатор: кадр уже отрисован синхронно в exec оператора — на
+	 * ГЛАВНОМ потоке, где есть GL-контекст. В рендер-джобе контекста нет, и
+	 * перерисовывать здесь нельзя: получился бы кадр сканирующего
+	 * растеризатора. */
+	if (rj->gpu_done) {
+		RE_SetReports(rj->re, NULL);
+		return;
+	}
+
 	if (rj->anim)
 		RE_BlenderAnim(rj->re, rj->main, rj->scene, rj->camera_override, rj->lay_override, rj->scene->r.sfra, rj->scene->r.efra, rj->scene->r.frame_step);
 	else
@@ -839,7 +911,10 @@ static int screen_render_invoke(bContext *C, wmOperator *op, const wmEvent *even
 	const bool is_animation = RNA_boolean_get(op->ptr, "animation");
 	const bool is_write_still = RNA_boolean_get(op->ptr, "write_still");
 	const bool use_viewport = RNA_boolean_get(op->ptr, "use_viewport");
-	View3D *v3d = use_viewport ? CTX_wm_view3d(C) : NULL;
+	/* ★ Раунд 83: не CTX_wm_view3d(), а детерминированный поиск — иначе выбор
+	 * камеры зависел от того, над каким окном стоит курсор (см.
+	 * screen_render_view3d_get выше). */
+	View3D *v3d = use_viewport ? screen_render_view3d_get(C) : NULL;
 	struct Object *camera_override = v3d ? V3D_CAMERA_LOCAL(v3d) : NULL;
 	const char *name;
 	ScrArea *sa;
@@ -993,6 +1068,57 @@ static int screen_render_invoke(bContext *C, wmOperator *op, const wmEvent *even
 	 * several layers from compositor [#31800]
 	 */
 	op->customdata = scene;
+
+	/* ★ F12 + GPU-растеризатор (mini-EEVEE): считаем кадр СИНХРОННО на главном
+	 * потоке. Рендер-джоба выполняется в фоновом потоке без GL-контекста, а в
+	 * 2.79 нет и создания фонового контекста (GHOST_CreateSystemBackgroundContext
+	 * отсутствует) — значит GPU-путь в джобе невозможен в принципе. На главном
+	 * потоке GL есть: рисуем здесь, а джоба потом только завершает работу
+	 * (см. rj->gpu_done / render_startjob). */
+	if (!rj->anim && !(jobflag & WM_JOB_SUSPEND) && !G.background &&
+	    scene->r.rasterizer_mode == RE_RASTERIZER_GPU)
+	{
+		short gpu_stop = 0, gpu_update = 0;
+		float gpu_progress = 0.0f;
+		/* Колбэки рендера (image_rect_update/render_progress_update) читают
+		 * эти указатели, а джобы, которая их обычно выставляет, ещё нет. */
+		rj->stop = &gpu_stop;
+		rj->do_update = &gpu_update;
+		rj->progress = &gpu_progress;
+
+		printf("[GPU-F12] синхронный рендер растеризатором на главном потоке\n");
+		RE_SetReports(re, op->reports);
+		RE_BlenderFrame(re, mainp, scene, srl, camera_override, rj->lay_override,
+		                scene->r.cfra, rj->write_still);
+		RE_SetReports(re, NULL);
+		rj->gpu_done = true;
+	}
+	/* ★ Анимация + GPU-растеризатор: «Render Animation» (кнопка в UI) идёт
+	 * тем же invoke-путём, что и F12, но с rj->anim=true. Если отдать её
+	 * джобе, кадры посчитаются на рабочем потоке без GL-контекста и упадут
+	 * в сканирующий растеризатор BI (тот же кадр, просто без GPU). Чтобы
+	 * кадры рисовались растеризатором, считаем ВСЮ анимацию синхронно здесь,
+	 * на главном потоке: каждый кадр проходит через do_render_3d и попадает
+	 * в GPU-ветку (BLI_thread_is_main()). После — rj->gpu_done, чтобы джоба
+	 * не перерисовала кадры сканирующим (см. render_startjob). Ограничение:
+	 * синхронный рендер замораживает UI на время анимации (как и одиночный
+	 * F12); прогресс-бар и ESC не работают. */
+	else if (rj->anim && !(jobflag & WM_JOB_SUSPEND) && !G.background &&
+	         scene->r.rasterizer_mode == RE_RASTERIZER_GPU)
+	{
+		short gpu_stop = 0, gpu_update = 0;
+		float gpu_progress = 0.0f;
+		rj->stop = &gpu_stop;
+		rj->do_update = &gpu_update;
+		rj->progress = &gpu_progress;
+
+		printf("[GPU-ANIM] синхронный рендер анимации растеризатором на главном потоке\n");
+		RE_SetReports(re, op->reports);
+		RE_BlenderAnim(re, mainp, scene, camera_override, rj->lay_override,
+		               scene->r.sfra, scene->r.efra, scene->r.frame_step);
+		RE_SetReports(re, NULL);
+		rj->gpu_done = true;
+	}
 
 	WM_jobs_start(CTX_wm_manager(C), wm_job);
 
@@ -1260,9 +1386,12 @@ static void render_view3d_startjob(void *customdata, short *stop, short *do_upda
 
 		/* custom fork: режим вьюпорта "Rasterizer" (OB_RASTER) считает превью
 		 * программным растеризатором форка. Настройку сцены не трогаем — это
-		 * свойство именно этого вьюпорта. */
-		if (rp->v3d && rp->v3d->drawtype == OB_RASTER)
-			rdata.rasterizer_mode = RE_RASTERIZER_SCANLINE;
+		 * свойство именно этого вьюпорта. Если в сцене явно выбран GPU-режим,
+		 * сохраняем его (mini-EEVEE); иначе по умолчанию SCANLINE. */
+		if (rp->v3d && rp->v3d->drawtype == OB_RASTER) {
+			if (rdata.rasterizer_mode != RE_RASTERIZER_GPU)
+				rdata.rasterizer_mode = RE_RASTERIZER_SCANLINE;
+		}
 
 		rdata.mode &= ~(R_OSA | R_MBLUR | R_BORDER | R_PANORAMA);
 		rdata.scemode &= ~(R_DOSEQ | R_DOCOMP | R_FREE_IMAGE | R_EXR_TILE_FILE | R_FULL_SAMPLE);
@@ -1287,6 +1416,17 @@ static void render_view3d_startjob(void *customdata, short *stop, short *do_upda
 
 	RE_SetPixelSize(re, pixsize);
 
+	/* ★ GPU-deferred растеризатор читает re->viewmat/re->winmat КАЖДЫЙ кадр при
+	 * отрисовке вьюпорта. Штатно RE_SetView() вызывается только внутри ветки
+	 * PR_UPDATE_DATABASE (ниже), поэтому при ЧИСТОМ вращении/панораме
+	 * (PR_UPDATE_VIEW, отдельный флаг = 1) re->viewmat оставался от предыдущего
+	 * прогона: вьюпорт уже повёрнут (гизмо показывает новое направление), а
+	 * растеризатор рисовал старую ориентацию. Программному растеризатору это
+	 * незаметно — он берёт вид из object->imat_ren (стр. 1247), а тот
+	 * обновляется как раз в ветке PR_UPDATE_VIEW. Ставим вид всегда: это копия
+	 * 4x4 плюс обращение, дёшево и идемпотентно. */
+	RE_SetView(re, rp->viewmat);
+
 	if ((update_flag & PR_UPDATE_DATABASE) || rstats->convertdone == 0) {
 		unsigned int lay = rp->scene->lay;
 
@@ -1305,6 +1445,12 @@ static void render_view3d_startjob(void *customdata, short *stop, short *do_upda
 
 		/* do preprocessing like building raytree, shadows, volumes, SSS */
 		RE_Database_Preprocess(re);
+
+		/* ★ GPU-растеризатор: база рендера пересобрана (и уже прошла препроцесс) —
+		 * VlakRen пересозданы, значит CPU-сцена устарела. Помечаем; пересоберёт
+		 * рендер-джоба, а старую сцену освободит главный поток в начале кадра
+		 * (см. RE_gpu_renderer_build_render / RE_gpu_renderer_draw_render). */
+		RE_gpu_renderer_invalidate(re);
 
 		/* conversion not completed, need to do it again */
 		if (!rstats->convertdone) {
@@ -1532,6 +1678,38 @@ void render_view3d_draw(RenderEngine *engine, const bContext *C)
 		re = RE_GetRender(name);
 
 		if (re == NULL) return;
+	}
+
+	/* ★ GPU deferred rasterizer (mini-EEVEE): если джоба собрала CPU-сцену,
+	 * рисуем G-буфер на главном потоке (GL-контекст вьюпорта) и выходим. */
+	if (RE_gpu_renderer_is_active(re)) {
+		ARegion *ar = CTX_wm_region(C);
+		int w = ar ? ar->winx : 0;
+		int h = ar ? ar->winy : 0;
+		/* ★ ВИД БЕРЁМ НАПРЯМУЮ ИЗ ВЬЮПОРТА, на главном потоке, прямо перед
+		 * отрисовкой. re->viewmat обновляет рендер-джоба (асинхронно), поэтому
+		 * между её прогонами он отстаёт от текущего положения камеры — и
+		 * объекты рисовались в СТАРОЙ ориентации: «гизмо вьюпорта показывает
+		 * одно направление, растеризатор другое», объект уезжает и выглядит
+		 * повёрнутым. rv3d->viewmat — это ровно та матрица, которой вьюпорт
+		 * рисует сам себя, поэтому расхождение исчезает. Заодно RE_SetView
+		 * пересчитывает re->viewinv, который нужен проходу освещения. */
+		{
+			RegionView3D *rv3d = CTX_wm_region_view3d(C);
+			if (rv3d) {
+				static int view_dbg = 0;
+				if (getenv("UBF_GPU_DEBUG") && view_dbg < 5) {
+					view_dbg++;
+					printf("[GPU-VIEW] вид вьюпорта rv3d->viewmat[0]=(%.3f %.3f %.3f %.3f) "
+					       "-> ставим его в re перед отрисовкой\n",
+					       rv3d->viewmat[0][0], rv3d->viewmat[0][1],
+					       rv3d->viewmat[0][2], rv3d->viewmat[0][3]);
+				}
+				RE_SetView(re, rv3d->viewmat);
+			}
+		}
+		RE_gpu_renderer_draw_render(re, w, h);
+		return;
 	}
 
 	/* Viewport render preview doesn't support multiview, view hardcoded to 0 */

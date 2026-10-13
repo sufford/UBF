@@ -5773,13 +5773,17 @@ static void rna_def_scene_render_data(BlenderRNA *brna)
 
 	/* custom fork: software rasterizer.
 	 * RE_RASTERIZER_EDGE/TILED пока падают в scanline (RE_storage_create),
-	 * поэтому в UI они не выставлены. */
+	 * поэтому в UI они не выставлены.
+	 * ★ FAST (4) снят с выбора: приближённый путь не нужен. Числовое значение 4
+	 * остаётся зарезервированным (DNA_scene_types.h), чтобы не сдвинуть GPU (5),
+	 * а старые .blend с сохранённой «4» переводит в OFF версионирование
+	 * (readfile.c, do_versions_after_linking). */
 	static const EnumPropertyItem rasterizer_mode_items[] = {
 		{RE_RASTERIZER_OFF, "OFF", 0, "Off", "Use the built-in rasterizer"},
 		{RE_RASTERIZER_SCANLINE, "SCANLINE", 0, "Scanline",
 		 "Use the software rasterizer (scanline storage)"},
-		{RE_RASTERIZER_FAST, "FAST", 0, "Fast (approximate)",
-		 "Software rasterizer + own approximate shader: fast, not bit-identical to Blender Internal"},
+		{RE_RASTERIZER_GPU, "GPU", 0, "GPU deferred",
+		 "GPU G-buffer rasterizer (mini-EEVEE, M1): interactive viewport, not bit-identical to Blender Internal"},
 		{0, NULL, 0, NULL, NULL}
 	};
 

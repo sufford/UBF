@@ -284,6 +284,10 @@ struct Render {
 	
 	/* software rasterizer (custom fork) */
 	struct RE_Rasterizer *rasterizer;
+
+	/* ★ GPU deferred rasterizer (mini-EEVEE, M1): CPU-массивы строит рендер-джоба,
+	 * GL-отрисовку на главном потоке делает RE_GPURenderer. */
+	struct RE_GPURenderer *gpu_renderer;
 	
 	/* Multi-threading support for ReInternal */
 	ThreadMutex tile_mutex;          // Protects tile scheduling

@@ -71,6 +71,12 @@ class RENDER_PT_render(RenderButtonsPanel, Panel):
 
         split = layout.split(percentage=0.33)
 
+        split.label(text="Rasterizer:")
+        row = split.row(align=True)
+        row.prop(rd, "rasterizer_mode", text="")
+
+        split = layout.split(percentage=0.33)
+
         split.label(text="Display:")
         row = split.row(align=True)
         row.prop(rd, "display_mode", text="")

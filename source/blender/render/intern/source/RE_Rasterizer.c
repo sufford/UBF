@@ -83,25 +83,12 @@ bool RE_rasterizer_enabled(struct Render *re)
     return true;
 }
 
-bool RE_fast_skip_raytree(struct Render *re)
-{
-	/* ★ Замер (полный кадр 1600x768, боевая сцена, Release):
-	 *   сборка октодерева 4.2 с из 8.3 с кадра;
-	 *   без дерева зеркала «плоские», но отличаются 0.4% пикселей
-	 *   (struct_corr 0.9995, mean 0.196 против того же пути с лучами).
-	 * Значит по умолчанию дерево не строим, а лучи включаются явно. */
-	static int env = -1;
-
-	if (env < 0) {
-		const char *e = getenv("UBF_FAST_RAYMIRROR");
-		env = (e && e[0] == '1') ? 0 : 1;   /* 1 = пропускать дерево */
-	}
-
-	if (!env) return false;
-	if (re == NULL) return false;
-
-	return (re->r.rasterizer_mode == RE_RASTERIZER_FAST);
-}
+/* ★ RE_fast_skip_raytree() УДАЛЕН (раунд 26). Он разрешал пропустить сборку
+ * октодерева (re->raytree) только в снятом режиме FAST: сборка стоила 4.2 с из
+ * 8.3 с кадра, но зеркала без дерева становились «плоскими» (отличались 0.4%
+ * пикселей, struct_corr 0.9995). Вместе с быстрым путём пропуск потерял смысл —
+ * октодерево теперь собирается всегда, как в BI. Оба вызова в convertblender.c
+ * сведены к прежнему условию (re->r.mode & R_RAYTRACE). */
 
 /* ------------------------------------------------------------------------- */
 /* ★ R3: КАДРОВЫЙ G-БУФЕР И ЭКРАННЫЕ ЗЕРКАЛА (screen-space reflection)        */
@@ -161,18 +148,9 @@ static bool re_fast_shadow_enabled(void)
 
 #define RE_FAST_SHADOW_STEPS 24
 
-/* Экранные зеркала выключаются UBF_FAST_SSR=0: тогда кадровый G-буфер не
- * выделяется вовсе и поведение быстрого пути как в R2 (зеркала «плоские»). */
-static bool re_fast_ssr_enabled(void)
-{
-	static int env = -1;
-
-	if (env < 0) {
-		const char *e = getenv("UBF_FAST_SSR");
-		env = (e && e[0] == '0') ? 0 : 1;
-	}
-	return env != 0;
-}
+/* ★ Здесь была re_fast_ssr_enabled() (ручка UBF_FAST_SSR) — выключатель зеркал
+ * для снятого быстрого пути. Удалена вместе с RE_shader_fast() (раунд 26):
+ * у BI-SSR свой выключатель, RE_bi_ssr_* ниже. */
 
 /* ★ SSR в BI: выключатель — поле .blend RenderData.ubf_bi_ssr, а переменная
  * окружения UBF_BI_SSR его ПЕРЕОПРЕДЕЛЯЕТ (нужна стендам: приёмка и замеры
@@ -180,8 +158,9 @@ static bool re_fast_ssr_enabled(void)
  *
  * «Присутствие и не ноль», а не «отсутствие нуля»: по умолчанию выключатель
  * ВЫКЛ, иначе побитовая приёмка accept.ps1 (BI против эталонов) обязана упасть.
- * Отдельный от UBF_FAST_SSR, потому что у BI свой источник данных в G-буфере
- * (шейдинг BI, а не наш шейдер). */
+ * Раньше он был отдельным от UBF_FAST_SSR, потому что у BI свой источник данных
+ * в G-буфере (шейдинг BI, а не наш шейдер); быстрый путь снят (раунд 26), так
+ * что теперь это единственный выключатель кадрового G-буфера. */
 static int bi_ssr_scene = 0;   /* RenderData.ubf_bi_ssr, ставит RE_bi_ssr_set_scene() */
 
 /* ★ Точность марша в BI: UBF_BI_SSR_MARCH=thick включает тест попадания «с
@@ -328,7 +307,6 @@ static int bi_ssr_march_probe(struct Render *re, const float *P0, const float *D
 void RE_fast_frame_begin(struct Render *re)
 {
 	int i, n;
-	const bool fast = RE_shader_fast();
 
 	/* ★ Выключатель SSR в BI берём из .blend (RenderData.ubf_bi_ssr) — здесь,
 	 * до шейдинга частей. Env UBF_BI_SSR, если задан, переопределяет его. */
@@ -336,15 +314,11 @@ void RE_fast_frame_begin(struct Render *re)
 
 	if (re_fast_frame.depth) RE_fast_frame_end();
 	if (re == NULL) return;
-	/* ★ Быстрый путь — свой выключатель (UBF_FAST_SSR), BI — свой
-	 * (UBF_BI_SSR). Раньше здесь стоял безусловный выход вне быстрого пути,
-	 * из-за чего BI кадровый G-буфер не получал вообще. */
-	if (fast) {
-		if (!re_fast_ssr_enabled()) return;
-	}
-	else {
-		if (!RE_bi_ssr_enabled()) return;
-	}
+	/* ★ Раньше здесь выбирался выключатель: у быстрого пути свой (UBF_FAST_SSR),
+	 * у BI свой (UBF_BI_SSR). Быстрый путь снят (раунд 26), поэтому кадровый
+	 * G-буфер строится только по BI — раньше безусловный выход отсюда приводил
+	 * к тому, что BI вообще не получал G-буфер. */
+	if (!RE_bi_ssr_enabled()) return;
 	if (re->rectx <= 0 || re->recty <= 0) return;
 
 	re_fast_frame.w = re->rectx;
@@ -470,7 +444,7 @@ bool RE_bi_ssr_hybrid(void)
 {
 	static int state = -1;
 
-	if (!RE_bi_ssr_enabled() || RE_shader_fast())
+	if (!RE_bi_ssr_enabled())
 		return false;
 
 	if (state < 0) {
@@ -529,21 +503,20 @@ void RE_fast_frame_resolve(struct Render *re)
 	const char *dumppath = getenv("UBF_BI_SSR_DUMP");
 
 	/* ★ Точность марша в BI: тест попадания «с толщиной» (UBF_BI_SSR_MARCH=thick)
-	 * и число шагов (UBF_BI_SSR_STEPS). Оба — только BI: у быстрого пути свой
-	 * допуск в приёмке, его марш не трогаем. */
-	const int thick = (RE_bi_ssr_enabled() && !RE_shader_fast()) && bi_ssr_march_thick();
-	/* ★ Точность марша: 256 шагов вместо 64 — только для BI. У быстрого пути
-	 * свой допуск в приёмке (fast_accept), его марш оставлен как был; иначе
-	 * смена качества молча сдвинула бы эталонные цифры приёмки. */
-	const int steps = (RE_bi_ssr_enabled() && !RE_shader_fast()) ? bi_ssr_steps() : 64;
-	/* ★ Бисекция момента пересечения — тоже только BI. */
-	const int bisect = (RE_bi_ssr_enabled() && !RE_shader_fast()) ? bi_ssr_bisect() : 0;
+	 * и число шагов (UBF_BI_SSR_STEPS). Раньше всё это было только для BI — у
+	 * быстрого пути свой допуск в приёмке; быстрый путь снят (раунд 26), так что
+	 * условия упростились до одного RE_bi_ssr_enabled(). */
+	const int thick = RE_bi_ssr_enabled() && bi_ssr_march_thick();
+	/* ★ Точность марша: 256 шагов вместо 64 (UBF_BI_SSR_STEPS). */
+	const int steps = RE_bi_ssr_enabled() ? bi_ssr_steps() : 64;
+	/* ★ Бисекция момента пересечения. */
+	const int bisect = RE_bi_ssr_enabled() ? bi_ssr_bisect() : 0;
 
 #ifdef WITH_UBF_CUDA
 	/* ★ ЭТАП A: марш считает GPU, всё остальное (смешение, ремонтный проход,
 	 * слияние частей) остаётся на CPU. Так проверка «CPU == GPU» проверяет
 	 * ровно ядро, а не всю систему. Любая ошибка CUDA — тихий откат на CPU. */
-	int use_gpu = (RE_bi_ssr_enabled() && !RE_shader_fast()) && bi_ssr_use_gpu();
+	int use_gpu = RE_bi_ssr_enabled() && bi_ssr_use_gpu();
 #else
 	const int use_gpu = 0;
 #endif
@@ -904,8 +877,7 @@ void RE_fast_frame_resolve(struct Render *re)
 		printf("\n");
 	}
 
-	printf("[%s-SSR] экранных зеркал: %d пикселей, попаданий: %d",
-	       RE_shader_fast() ? "FAST" : "BI", mirrored, hits);
+	printf("[BI-SSR] экранных зеркал: %d пикселей, попаданий: %d", mirrored, hits);
 	if (defer)
 		printf(", в луч уходят: %d%s", misses,
 		       (misses > 0) ? " (гибрид: ремонтный проход)" : " (гибрид: промахов нет)");

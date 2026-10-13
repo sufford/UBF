@@ -404,6 +404,7 @@ int RE_rayobject_raycast(RayObject *r, Isect *isec)
 
 int RE_rayobject_intersect(RayObject *r, Isect *i)
 {
+	if (r == NULL) return 0;
 	if (RE_rayobject_isRayFace(r)) {
 		return intersect_rayface(r, (RayFace *) RE_rayobject_align(r), i);
 	}
@@ -447,6 +448,7 @@ void RE_rayobject_free(RayObject *r)
 
 float RE_rayobject_cost(RayObject *r)
 {
+	if (r == NULL) return 1.0f;
 	if (RE_rayobject_isRayFace(r) || RE_rayobject_isVlakPrimitive(r)) {
 		return 1.0f;
 	}
@@ -464,6 +466,7 @@ float RE_rayobject_cost(RayObject *r)
 
 void RE_rayobject_merge_bb(RayObject *r, float min[3], float max[3])
 {
+	if (r == NULL) return;
 	if (RE_rayobject_isRayFace(r)) {
 		RayFace *face = (RayFace *) RE_rayobject_align(r);
 
@@ -494,6 +497,7 @@ void RE_rayobject_merge_bb(RayObject *r, float min[3], float max[3])
 
 void RE_rayobject_hint_bb(RayObject *r, RayHint *hint, float *min, float *max)
 {
+	if (r == NULL) return;
 	if (RE_rayobject_isRayFace(r) || RE_rayobject_isVlakPrimitive(r)) {
 		return;
 	}

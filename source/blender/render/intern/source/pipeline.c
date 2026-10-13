@@ -97,6 +97,7 @@
 #include "pixelblending.h"
 #include "zbuf.h"
 #include "RE_Rasterizer.h"
+#include "RE_GPURenderer.h"
 #include "RE_Prof.h"   /* ★ PROF */
 
 /* render flow
@@ -792,17 +793,11 @@ void RE_InitState(Render *re, Render *source, RenderData *rd,
 
 	/* ★ FAST-путь: приближённый быстрый рендер.
 	 *
-	 * OSA выключается принудительно, и это часть ОПРЕДЕЛЕНИЯ режима, а не
-	 * побочный эффект: свой шейдер подключён только к не-OSA ветке
-	 * (zbufshade_tile, rendercore.c), плюс OSA стоит 8× по числу сэмплов.
-	 * Приближённый путь сознательно платит качеством AA за скорость
-	 * (проект: «кадр должен считаться за секунды, а не минуты»).
-	 * Старые пути (OFF/SCANLINE) не затрагиваются: режим — явная настройка
-	 * scene.render.rasterizer_mode. */
-	if (re->r.rasterizer_mode == RE_RASTERIZER_FAST) {
-		re->r.mode &= ~R_OSA;
-		printf("[FAST] rasterizer_mode=FAST: OSA forced off (approx path)\n");
-	}
+	 * ★ Раньше здесь для снятого режима FAST принудительно снимался R_OSA:
+	 * приближённый путь сознательно платил качеством AA за скорость, потому что
+	 * свой шейдер был подключён только к не-OSA ветке (zbufshade_tile,
+	 * rendercore.c). Быстрый путь снят (раунд 26) — OSA больше нигде не
+	 * выключается, настройка пользователя уважается во всех режимах. */
 
 	re->r.scemode = check_mode_full_sample(&re->r);
 
@@ -1459,6 +1454,17 @@ static void threaded_tile_processor(Render *re)
 	if (re->result == NULL)
 		return;
 
+	/* ★ GPU-растеризатор (mini-EEVEE):
+	 *   - при rasterizer_mode = GPU: собираем CPU-сцену из VlakRen и сохраняем
+	 *     в re->gpu_renderer (джоба, без GL). Главный поток рисует во вьюпорте.
+	 *   - при UBF_GPU_DEBUG: отладочный хук — собрать и вывести статистику. */
+	if (re->r.rasterizer_mode == RE_RASTERIZER_GPU) {
+		RE_gpu_renderer_build_render(re);
+	}
+	else if (getenv("UBF_GPU_DEBUG")) {
+		RE_gpu_renderer_debug_build(re);
+	}
+
 	/* ★ Плиточная сетка для внутреннего рендерера больше не используется.
 	 * RE_parts_clamp() берёт размер части из r.tilex/tiley, поэтому здесь
 	 * задаётся разбиение: во всю ширину кадра, а по высоте — на полосы по числу
@@ -1888,7 +1894,46 @@ static void do_render_3d(Render *re)
 				if (pass < 1) pass= 1;
 			}
 
-			if (!pe || pass >= re->r.osa) {
+			/* ★ F12 + GPU-растеризатор: считаем кадр ЗДЕСЬ и ЗАМЕСТО
+			 * сканирующего растеризатора. Сюда попадаем ТОЛЬКО с главного потока:
+			 * оператор F12 при rasterizer_mode=GPU вызывает RE_BlenderFrame
+			 * синхронно, а GL-контекст в 2.79 существует только у главного потока
+			 * (фонового контекста GHOST_CreateSystemBackgroundContext /
+			 * wm_opengl_context_create в 2.79 ещё нет). Поэтому обязателен
+			 * признак BLI_thread_is_main(): анимация («Render Animation») идёт
+			 * через WM_jobs -> render_startjob на РАБОЧЕМ потоке, и там GPU-ветка
+			 * не может работать — честно откатываемся на сканирующий растеризатор
+			 * BI (тот же кадр, просто без GPU). В фоновом режиме (-b) тоже нет
+			 * GL-контекста, и его отсекает !G.background. Без этой связки вызовы
+			 * GL с рабочего потока уронили бы Blender. */
+			if (re->r.rasterizer_mode == RE_RASTERIZER_GPU && !G.background &&
+			    BLI_thread_is_main()) {
+				/* ★★ ВАЖНО: глобальный R заполняется ТОЛЬКО внутри
+				 * threaded_tile_processor (pipeline.c:1581 «R = *re»), а он в
+				 * GPU-ветке не вызывается. Без этого вся шейдинговая часть BI
+				 * продолжает смотреть на базу ПРЕДЫДУЩЕГО рендера, которая уже
+				 * освобождена RE_Database_Free — и следующий же
+				 * add_halo_flare() (он вызывается в конце do_render_all_options
+				 * при re->flag & R_HALO и читает R.objecttable/R.sortedhalos)
+				 * падает с EXCEPTION_ACCESS_VIOLATION. Проверено на сцене с
+				 * материалом HALO: падение было именно в project_renderdata. */
+				R = *re;
+
+				/* ★ Анимация/F12: база рендера пересобрана выше (RE_Database_FromScene),
+				 * и для анимации она НОВАЯ на каждый кадр (объекты двигаются, их мировые
+				 * координаты, запечённые в вершины, меняются). RE_gpu_renderer_build_render
+				 * пересобирает CPU-сцену ТОЛЬКО при scene_dirty — иначе меш остаётся от
+				 * ПЕРВОГО кадра и анимация «застывает». Вьюпорт-путь помечает сцену
+				 * устаревшей сам (см. RE_gpu_renderer_invalidate в render_view3d_draw),
+				 * а здесь (F12/анимация) это не делалось. Помечаем явно. */
+				RE_gpu_renderer_invalidate(re);
+
+				RE_gpu_renderer_build_render(re);
+				if (re->result && !RE_gpu_renderer_render_to_result(re, re->result->rectx, re->result->recty)) {
+					printf("[GPU-F12] растеризатор не отрисовал кадр\n");
+				}
+			}
+			else if (!pe || pass >= re->r.osa) {
 				R_prog_pass_start= 0;
 				R_prog_pass_end= -1;
 				threaded_tile_processor(re);

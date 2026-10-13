@@ -276,8 +276,11 @@ void ED_view3d_stop_render_preview(wmWindowManager *wm, ARegion *ar)
 		BPy_END_ALLOW_THREADS;
 #endif
 
-		if (rv3d->render_engine->re)
+		if (rv3d->render_engine->re) {
+			/* ★ GPU deferred rasterizer: освободить GL-ресурсы на главном потоке. */
+			RE_gpu_renderer_free_render(rv3d->render_engine->re);
 			RE_Database_Free(rv3d->render_engine->re);
+		}
 		RE_engine_free(rv3d->render_engine);
 		rv3d->render_engine = NULL;
 	}

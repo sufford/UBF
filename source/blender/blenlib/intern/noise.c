@@ -35,7 +35,8 @@ static float noise3_perlin(float vec[3]);
 
 /* needed for voronoi */
 #define HASHPNT(x, y, z) hashpntf + 3 * hash[(hash[(hash[(z) & 255] + (y)) & 255] + (x)) & 255]
-static const float hashpntf[768] = {
+/* не static: RE_GPURenderer.c читает её как extern для GPU-текстуры hashpntf (M20) */
+const float hashpntf[768] = {
 	0.536902, 0.020915, 0.501445, 0.216316, 0.517036, 0.822466, 0.965315,
 	0.377313, 0.678764, 0.744545, 0.097731, 0.396357, 0.247202, 0.520897,
 	0.613396, 0.542124, 0.146813, 0.255489, 0.810868, 0.638641, 0.980742,

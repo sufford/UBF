@@ -74,44 +74,33 @@ extern struct Render R;
  */
 #define SHADER_PASS_OK (SCE_PASS_COMBINED | SCE_PASS_Z)
 
-/* ★ БЫСТРЫЙ ПУТЬ (rasterizer_mode = FAST).
+/* ★ БЫСТРЫЙ ПУТЬ СНЯТ (раунд 26).
  *
- * Отличие от UBF_SHADER (шаг B3/B4) — не в шейдере, а в КОНТРАКТЕ:
- *   - UBF_SHADER обязан быть побитово равен BI, поэтому откатывает на BI всё,
- *     что не умеет (текстуры, тени, AO, прозрачность, ...); на боевой сцене
- *     это 0% покрытия, то есть весь рендер всё равно считает BI;
- *   - FAST откатываться не имеет права: он покрывает 100% пикселей и
- *     заменяет неподдержанное приближением (нет теней, нет AO, нет спекуляра,
- *     прозрачность = непрозрачность). Приёмка у него своя — допуск по картинке
- *     и время, а не max=0 против BI.
+ * Здесь была RE_shader_fast(): приближённое затенение включалось либо по
+ * rasterizer_mode == RE_RASTERIZER_FAST, либо внешней ручкой UBF_FAST. Режим FAST
+ * убран из UI (rna_scene.c), старые .blend с сохранённой «4» переводит в OFF
+ * версионирование (readfile.c), а сам предикат удалён вместе со всеми вызовами —
+ * значит быстрый путь недостижим ни из GUI, ни из окружения.
  *
- * Старый путь при этом никуда не девается: он включается своим значением
- * rasterizer_mode (OFF — BI, SCANLINE — наш растеризатор + BI-затенение,
- * UBF_SHADER=1 — побитовый свой шейдер).
+ * ЧТО ОСТАЛОСЬ МЁРТВЫМ. За предикатом было порядка тысячи строк: свой
+ * приближённый шейдер (shader_fast_samples и окружение), свой SSR и кадровый
+ * G-буфер (RE_Rasterizer.c), кэш derived-mesh (convertblender.c), ускоренный
+ * пересчёт частиц (MOD_particlesystem.c). Физически они НЕ удалены: часть кода
+ * общая с UBF_SHADER=1 (побитовый свой шейдер), который продолжает работать, и с
+ * BI-SSR (кадровый G-буфер строится для обоих путей). Удаление — отдельная
+ * задача; сейчас всё перечисленное недостижимо, т.к. RE_RASTERIZER_FAST не может
+ * возникнуть ни из RNA, ни из загруженного файла.
  *
- * Кэш: признак режима нельзя кэшировать в static на процесс — в GUI режим
- * переключается без перезапуска. Поле R.r.rasterizer_mode читается напрямую
- * (это чтение поля, не getenv); getenv остался только как внешняя ручка для
- * замеров и кэшируется отдельно. */
-bool RE_shader_fast(void)
-{
-	static int env_cached = -1;
-
-	if (R.r.rasterizer_mode == RE_RASTERIZER_FAST)
-		return true;
-
-	if (env_cached < 0)
-		env_cached = getenv("UBF_FAST") ? 1 : 0;
-
-	return env_cached != 0;
-}
+ * Старый путь никуда не девается: он включается своим значением rasterizer_mode
+ * (OFF — BI, SCANLINE — наш растеризатор + BI-затенение, UBF_SHADER=1 — побитовый
+ * свой шейдер). */
 
 bool RE_shader_enabled(void)
 {
 	static int cached = -1;
 
 	if (cached < 0) cached = getenv("UBF_SHADER") ? 1 : 0;
-	return cached != 0 || RE_shader_fast();
+	return cached != 0;
 }
 
 /* Текстуры и рампы в быстром пути: по умолчанию ВКЛЮЧЕНЫ.
@@ -845,18 +834,9 @@ int RE_shader_shade_samples(Render *re, ShadeSample *ssamp, PixStr *ps, int x, i
 		return shade_samples_shade(ssamp);
 	}
 
-	/* ★ БЫСТРЫЙ ПУТЬ: setup уже сделан (он один и тот же у обоих путей —
-	 * именно он резолвит obi/facenr -> vlr/material и раскладывает co/vn/uv).
-	 * Дальше откатов нет по определению режима: неподдержанное приближается,
-	 * а не отдаётся BI. Запрос пассов сверх COMBINED|Z обработан выше и
-	 * по-прежнему отдаётся BI — иначе мы бы «рисовали» незаполненные пассы. */
-	if (RE_shader_fast()) {
-		if (shader_fast_samples(re, ssamp, co, vn) >= 0)
-			return 1;
-		if (why) *why = "fast: shade failed";
-		return shade_samples_shade(ssamp);
-	}
-
+	/* ★ Здесь был выбор «быстрый путь или точный». Режим FAST снят (раунд 26),
+	 * предикат удалён, поэтому остаётся только точный путь: setup выше общий для
+	 * обоих, дальше неподдержанное отдаётся BI через shader_unsupported(). */
 	bad = shader_unsupported(re, shi);
 	if (bad) {
 		if (why) *why = bad;

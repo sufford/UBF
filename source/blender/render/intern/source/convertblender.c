@@ -3120,100 +3120,22 @@ static bool has_freestyle_edge_mark(EdgeHash *edge_hash, int v1, int v2)
 }
 #endif
 
-/* ★ R5: КЭШ РЕНДЕРНОЙ ГЕОМЕТРИИ ДЛЯ БЫСТРОГО ПУТИ.
+/* ★ КЭШ РЕНДЕРНОЙ ГЕОМЕТРИИ (R5, UBF_FAST_DMCACHE) УДАЛЁН (раунд 26).
  *
- * Замер (R4): кадр боевой сцены 3.95 с, из них 2.99 с — подготовка сцены, а в
- * ней 2.50 с — mesh_create_derived_render по 7594 объектам, и почти вся эта
- * цена это вычисление модификаторов (SUBSURF/BEVEL/SOLIDIFY на 3428 объектах).
- * Платится КАЖДЫЙ кадр целиком: mesh_create_derived_render (DerivedMesh.c:2786)
- * зовёт mesh_calc_modifiers БЕЗУСЛОВНО, мимо кэша ob->derivedFinal/lastDataMask,
- * которым пользуется вьюпортный путь (mesh_get_derived_final, DerivedMesh.c:2748).
+ * Он существовал ТОЛЬКО ради снятого режима FAST: перекладывал рендерный DM в
+ * кэш объекта (ob->derivedFinal), чтобы не платить mesh_create_derived_render по
+ * 7594 объектам каждый кадр (замер R4: 2.50 с из 3.95 с кадра). Работал он лишь
+ * при rasterizer_mode == FAST, а этот режим снят — значит не работал никогда.
+ * Остаётся штатный путь Blender: каждый кадр строится свежий DM.
  *
- * Здесь рендерный DM кладётся в ТОТ ЖЕ кэш объекта, и следующий кадр берёт его
- * оттуда. Признак «данные объекта не менялись» — не наши догадки про recalc
- * (депграф их обнуляет: BKE_object_handle_update_ex, object.c:2674), а сам
- * Blender: любая пометка объекта зовёт BKE_object_free_derived_caches(), который
- * обнуляет ob->derivedFinal. Поэтому «ob->derivedFinal всё ещё указывает на наш
- * DM» и есть ответ «Blender считает данные неизменными». Ровно на этот контракт
- * опирается вьюпорт, и мы не изобретаем свой.
- *
- * Почему нужна боковая таблица (Object* -> наш DM): ob->derivedFinal может
- * оказаться чужим DM (вьюпорт перестроил под себя) — тогда переиспользовать его
- * как рендерный нельзя, надо строить свой.
- *
- * ob->lastDataMask намеренно ставится в 0: это метка «DM построен для рендера и
- * чужим потребителям не годится», поэтому вьюпорт при обращении перестроит его
- * под себя (и тем самым сбросит наш кэш — это осознанный выбор в пользу
- * корректности вьюпорта, а не тихой подмены ему геометрии рендерного качества).
- *
- * Выключатель: UBF_FAST_DMCACHE=0. Работает только в режиме FAST. */
-static GHash *re_fast_dm_cache = NULL;
-
-static bool re_fast_dm_cache_enabled(void)
-{
-	static int env = -1;
-
-	if (env < 0) {
-		const char *e = getenv("UBF_FAST_DMCACHE");
-		env = (e && e[0] == '0') ? 0 : 1;
-	}
-	return env != 0;
-}
-
-/* Возвращает DerivedMesh объекта. *r_cached = true означает «DM теперь живёт в
- * кэше объекта, освобождать его вызывающему НЕЛЬЗЯ». */
+ * Возвращает DerivedMesh объекта. *r_cached = true означало «DM теперь живёт в
+ * кэше объекта, освобождать его вызывающему НЕЛЬЗЯ»; теперь всегда false —
+ * вызывающий получает свежий DM и освобождает его сам, как везде в Blender. */
 static DerivedMesh *init_render_mesh_derived(Render *re, Object *ob,
                                              CustomDataMask mask, bool *r_cached)
 {
-	DerivedMesh *dm, *prev;
-	double t_dm0 = RE_prof_tick();   /* ★ PROF */
-
 	*r_cached = false;
-
-	/* ВАЖНО: именно re->r.rasterizer_mode, а не RE_shader_fast(): та читает
-	 * ГЛОБАЛЬНЫЙ R, а он копируется из re позже, уже в конвейере
-	 * (pipeline.c: R = *re), то есть на этапе конвертации сцены ещё не готов. */
-	if (re->r.rasterizer_mode != RE_RASTERIZER_FAST || !re_fast_dm_cache_enabled()) {
-		return mesh_create_derived_render(re->scene, ob, mask);
-	}
-
-	RE_prof_count_dm(RE_PROF_DM_ALIVE, ob->derivedFinal != NULL);   /* ★ PROF */
-
-	if (re_fast_dm_cache == NULL)
-		re_fast_dm_cache = BLI_ghash_ptr_new("RE fast dm cache");
-
-	prev = BLI_ghash_lookup(re_fast_dm_cache, ob);
-
-	/* Blender не трогал derivedFinal => объект не менялся => берём свой DM. */
-	if (prev && ob->derivedFinal == prev) {
-		RE_prof_count_dm(RE_PROF_DM_REUSE, 1);   /* ★ PROF */
-		*r_cached = true;
-		return prev;
-	}
-
-	dm = mesh_create_derived_render(re->scene, ob, mask);
-	RE_prof_count_dm(RE_PROF_DM_BUILD, 1);   /* ★ PROF */
-
-	/* ★ PROF: найти «монстров» — объекты, чьё построение решает всё время. */
-	if (RE_prof_active()) {
-		double dt = RE_prof_tick() - t_dm0;
-		if (dt > 0.05)
-			printf("[FAST-DM] медленно: %s = %.3f s | вершин=%d граней=%d"
-			       " (примерно %.1f МБ данных)\n",
-			       ob->id.name + 2, dt,
-			       dm->getNumVerts(dm), dm->getNumTessFaces(dm),
-			       (dm->getNumVerts(dm) * 32.0 +
-			        dm->getNumTessFaces(dm) * 24.0) / (1024.0 * 1024.0));
-	}
-
-	BKE_object_free_derived_caches(ob);   /* освободит прежний DM, если он был */
-	ob->derivedFinal = dm;
-	ob->derivedFinal->needsFree = 0;
-	ob->lastDataMask = 0;   /* см. шапку: чужим потребителям не годится */
-	BLI_ghash_insert(re_fast_dm_cache, ob, dm);
-
-	*r_cached = true;
-	return dm;
+	return mesh_create_derived_render(re->scene, ob, mask);
 }
 
 static void init_render_mesh(Render *re, ObjectRen *obr, int timeoffset)
@@ -5425,26 +5347,22 @@ void RE_Database_Preprocess(Render *re)
 		re->stats_draw(re->sdh, &re->i);
 
 		/* SHADOW BUFFER
-		 * ★ FAST: теней нет вообще (быстрый шейдер их не сэмплит), значит и
-		 * теневые буферы не нужны. Они строятся для всех спот-ламп с
-		 * LA_SHAD_BUF — на боевой сцене это заметная часть подготовки.
-		 * lar->shb при этом остаётся аллоцированным (initshadowbuf), но с
-		 * пустым списком буферов: testshadowbuf() на таком сразу отдаёт 1.0
-		 * (shadbuf.c, первая проверка), то есть «тени нет» — это и нужно. */
-		if (re->r.rasterizer_mode != RE_RASTERIZER_FAST)
-			threaded_makeshadowbufs(re);
+		 * ★ Раньше здесь был пропуск для снятого режима FAST: его шейдер теней
+		 * не сэмплил, поэтому теневые буферы (для всех спот-ламп с LA_SHAD_BUF)
+		 * не строились. Быстрый путь снят (раунд 26) — строим всегда, как в BI. */
+		threaded_makeshadowbufs(re);
 
 		/* old code checked for internal render (aka not yafray) */
 		{
 			/* raytree */
 			if (!re->test_break(re->tbh)) {
-				/* ★ FAST: октодерево не строим. Оно нужно только лучам
-				 * зеркал/теней/AO, а быстрый путь теней и AO не считает,
-				 * а зеркала берёт из экранного буфера (RE_Fast). Сборка
-				 * дерева — 4.2 с из 8.3 с кадра, это главный постоянный
-				 * расход. Кто ещё ходит в re->raytree, сам проверяет его
-				 * на NULL (RE_Mirror.c:283, rayshade.c, volumetric.c). */
-				if ((re->r.mode & R_RAYTRACE) && !RE_fast_skip_raytree(re)) {
+				/* ★ Раньше здесь стоял пропуск для снятого режима FAST: он не
+				 * считал тени и AO, а зеркала брал из экранного буфера, поэтому
+				 * октодерево (4.2 с из 8.3 с кадра) ему было не нужно. Быстрый
+				 * путь снят (раунд 26) — дерево собирается всегда, как в BI.
+				 * Кто ещё ходит в re->raytree, сам проверяет его на NULL
+				 * (RE_Mirror.c:283, rayshade.c, volumetric.c). */
+				if (re->r.mode & R_RAYTRACE) {
 					makeraytree(re);
 				}
 			}
@@ -6144,14 +6062,14 @@ void RE_Database_Baking(Render *re, Main *bmain, Scene *scene, unsigned int lay,
 
 	set_material_lightgroups(re);
 
-	/* SHADOW BUFFER (в FAST не нужны — см. пояснение у основного вызова) */
+	/* SHADOW BUFFER (раньше в снятом режиме FAST не строились — теперь всегда) */
 	if (type!=RE_BAKE_LIGHT)
-		if ((re->r.mode & R_SHADOW) && re->r.rasterizer_mode != RE_RASTERIZER_FAST)
+		if (re->r.mode & R_SHADOW)
 			threaded_makeshadowbufs(re);
 
 	/* raytree */
 	if (!re->test_break(re->tbh))
-		if ((re->r.mode & R_RAYTRACE) && !RE_fast_skip_raytree(re))
+		if (re->r.mode & R_RAYTRACE)
 			makeraytree(re);
 
 	/* point density texture */
