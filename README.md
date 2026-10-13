@@ -2,6 +2,7 @@
 For compatibility reasons, no old BGE features will be removed, and will be left as is. Note that they won't be supported.
 
 Currently featuring:
+* Real-time Internal render (In process)
 * Dynamic layers (In process)
 * Custom modifiers (Currently 10 implemented and 1 backported; planning to increase up to 25 custom modifiers and 5 backported)
 * KXScript, replacing BGE python module lib (In process; extremely basic functions for now) (In process)
@@ -9,7 +10,6 @@ Currently featuring:
 * Edit poly (In process)
 
 Future roadmap:
-* Real-time Internal render (In process; optimized for now)
 * Real-time Cycles render
 * OpenGL 3.3 (Unlikely, but possible)
 * VST support (Also unlikely)
