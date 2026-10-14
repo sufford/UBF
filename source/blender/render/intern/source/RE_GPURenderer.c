@@ -149,7 +149,7 @@ static int gpu_proc_extract(RE_GPUMesh *m, MTex *mtex)
 {
 	Tex *tex;
 	if (!mtex || !(tex = mtex->tex)) return 0;
-	if (tex->type != TEX_CLOUDS && tex->type != TEX_BLEND) return 0;
+	if (tex->type != TEX_CLOUDS && tex->type != TEX_BLEND && tex->type != TEX_WOOD && tex->type != TEX_DISTNOISE) return 0;
 	/* ★ M20: раньше принимали только MAP_COL. Теперь та же процедурная текстура
 	 * может влиять на блик/жёсткость/цвет блика/отражение (BI: один сэмпл
 	 * `texres` питает все каналы сразу). Наличие MAP_COL отдельно запоминаем:
@@ -165,6 +165,8 @@ static int gpu_proc_extract(RE_GPUMesh *m, MTex *mtex)
 	if (m->proc_noisedepth < 0) m->proc_noisedepth = 0;
 	if (m->proc_noisedepth > 8) m->proc_noisedepth = 8;   /* потолок GLSL-цикла */
 	m->proc_basis = (int)tex->noisebasis;
+	m->proc_wf = (int)tex->noisebasis2;
+	m->proc_dist = tex->dist_amount;
 	m->proc_hard = (tex->noisetype != TEX_NOISESOFT) ? 1 : 0;
 	m->proc_bright = tex->bright;
 	m->proc_contrast = tex->contrast;
@@ -250,7 +252,7 @@ static int gpu_proc_extract2(RE_GPUMesh *m, MTex *mtex)
 {
 	Tex *tex;
 	if (!mtex || !(tex = mtex->tex)) return 0;
-	if (tex->type != TEX_CLOUDS && tex->type != TEX_BLEND) return 0;
+	if (tex->type != TEX_CLOUDS && tex->type != TEX_BLEND && tex->type != TEX_WOOD && tex->type != TEX_DISTNOISE) return 0;
 	if (!(mtex->mapto & (MAP_SPEC | MAP_HAR | MAP_NORM))) return 0;
 
 	m->has_proc2 = 1;
@@ -262,6 +264,8 @@ static int gpu_proc_extract2(RE_GPUMesh *m, MTex *mtex)
 	if (m->proc2_noisedepth < 0) m->proc2_noisedepth = 0;
 	if (m->proc2_noisedepth > 8) m->proc2_noisedepth = 8;   /* потолок GLSL-цикла */
 	m->proc2_basis = (int)tex->noisebasis;
+	m->proc2_wf = (int)tex->noisebasis2;
+	m->proc2_dist = tex->dist_amount;
 	m->proc2_hard = (tex->noisetype != TEX_NOISESOFT) ? 1 : 0;
 	m->proc2_bright = tex->bright;
 	m->proc2_contrast = tex->contrast;
@@ -332,6 +336,9 @@ static RE_GPUMesh *gpu_mesh_new(RE_GPUScene *scene, Material *ma,
 		m->hard = (float)ma->har;
 		if (m->hard < 1.0f) m->hard = 1.0f;
 		if (m->hard > 511.0f) m->hard = 511.0f;
+		if (getenv("UBF_GPU_DEBUG"))
+			printf("[GPU-SPEC] ma='%s' spec=%.3f specr=%.3f specg=%.3f specb=%.3f har=%d\n",
+			       ma->id.name + 2, ma->spec, ma->specr, ma->specg, ma->specb, (int)ma->har);
 	}
 
 	/* ★ SSR: БАЗОВАЯ сила отражения. BI включает зеркало ТОЛЬКО при включённой
@@ -383,6 +390,8 @@ static RE_GPUMesh *gpu_mesh_new(RE_GPUScene *scene, Material *ma,
 						       m->proc_has_ramp, m->proc_basis, m->proc_noisedepth,
 						       m->proc_noisesize, m->proc_orco, m->colfac, m->tex_blend,
 						       m->proc_col, m->spec_has, m->har_has, m->colspec_has, m->refl_has);
+						printf("[GPU-SPECCFG] ma='%s' spec_has=%d spec_fac=%.3f spec_def=%.3f spec_blend=%d\n",
+						       ma->id.name + 2, m->spec_has, m->spec_fac, m->spec_def, m->spec_blend);
 					}
 				}
 				/* ★ M22: та же процедурная текстура, но на ДРУГОМ слоте — берём её
@@ -1144,7 +1153,7 @@ static void gpu_gather_lights(RE_GPURenderer *gr)
 	 * Раньше учитывалось ТОЛЬКО солнце: сцены с point/spot-лампами (а таких
 	 * большинство — tut1, cave, traffic, jolly, alone, motorcycle) освещались
 	 * фейковым белым светом «сверху вниз». Теперь собираем все лампы, но шейдер
-	 * держит лишь GPU_MAX_LIGHTS — поэтому отбираем самые значимые. */
+	 * держит лишь GPU_MAX_SHADOW_LIGHTS — поэтому отбираем самые значимые. */
 	{
 		int total = 0;
 		LampRen *lar;
@@ -1190,8 +1199,18 @@ static void gpu_gather_lights(RE_GPURenderer *gr)
 				}
 			}
 
-			/* Выбор максимума: n в реальных сценах невелик (десятки лампочек) */
-			for (int k = 0; k < GPU_MAX_LIGHTS && k < n; k++) {
+			/* ★ Раунд 16: берём ВСЕ лампы сцены (раньше — только
+			 * GPU_MAX_SHADOW_LIGHTS самых значимых). Порядок всё ещё важен:
+			 * первые GPU_MAX_SHADOW_LIGHTS получают теневые карты (их число
+			 * ограничено текстурными юнитами), остальные светят без тени. */
+			if (gr->lights_cap < n) {
+				if (gr->lights) MEM_freeN(gr->lights);
+				gr->lights = MEM_callocN(sizeof(RE_GPULight) * n, "gpu lights");
+				gr->lights_cap = n;
+			}
+			gr->num_lights = 0;
+
+			for (int k = 0; k < n; k++) {
 				int bi = -1;
 				float bs = -1.0f;
 
@@ -1205,11 +1224,11 @@ static void gpu_gather_lights(RE_GPURenderer *gr)
 				score[bi] = -1.0f;   /* -1 недостижим (score >= 0) — метка «взято» */
 			}
 
-			if (total > GPU_MAX_LIGHTS) {
-				printf("[GPU] ламп в сцене %d, шейдер держит %d: взяты самые релевантные "
-				       "виду (яркость × близость к камере, направленные в приоритете), "
-				       "остальные кадр не освещают\n",
-				       total, GPU_MAX_LIGHTS);
+			if (total > GPU_MAX_SHADOW_LIGHTS) {
+				printf("[GPU] ламп в сцене %d: светят ВСЕ, тень дают первые %d "
+				       "(самые релевантные виду: направленные, затем яркость × "
+				       "близость к камере)\n",
+				       total, GPU_MAX_SHADOW_LIGHTS);
 			}
 
 			MEM_freeN(score);
@@ -1437,6 +1456,10 @@ static void gpu_compute_shadow_mats(RE_GPURenderer *gr, RE_GPUScene *scene)
 	int mirrored = 0;
 	for (int i = 0; i < gr->num_lights; i++) {
 		RE_GPULight *L = &gr->lights[i];
+		/* ★ Раунд 16: теневых карт ровно GPU_MAX_SHADOW_LIGHTS — их число задано
+		 * текстурными юнитами (пара сэмплеров на лампу). Лампы дальше по списку
+		 * СВЕТЯТ, но без тени: гасим флаг, и шейдер для них получит fl.w=0. */
+		if (i >= GPU_MAX_SHADOW_LIGHTS) L->shadows = 0;
 		if (!L->shadows) continue;
 		if (L->type == GPU_LIGHT_SUN) {
 			gpu_compute_sun_shadow(scene, L);
@@ -1671,7 +1694,7 @@ void RE_gpu_renderer_build_render(Render *re)
 	{
 		static const char *tn[4] = { "sun", "point", "spot", "area" };
 		printf("[GPU] lights: n=%d\n", gr->num_lights);
-		for (int i = 0; i < gr->num_lights && i < GPU_MAX_LIGHTS; i++) {
+		for (int i = 0; i < gr->num_lights && i < GPU_MAX_SHADOW_LIGHTS; i++) {
 			const RE_GPULight *L = &gr->lights[i];
 			printf("[GPU-LIGHT] [%d] %-5s color=(%.3f %.3f %.3f) pos=(%.2f %.2f %.2f) "
 			       "dir=(%.2f %.2f %.2f) dist=%.1f falloff=%d sphere=%d spotsi=%.3f soft=%.2f\n",
@@ -1872,6 +1895,8 @@ void RE_gpu_renderer_free(RE_GPURenderer *gr)
 		RE_gpu_renderer_scene_free(gr->scene_old);
 	}
 	if (gr->scene) RE_gpu_renderer_scene_free(gr->scene);
+	/* ★ раунд 16: динамический массив ламп (число ламп не ограничено) */
+	if (gr->lights) MEM_freeN(gr->lights);
 	MEM_freeN(gr);
 }
 
@@ -1923,14 +1948,14 @@ void RE_gpu_renderer_dump(const RE_GPURenderer *gr)
 		printf("[GPU] lights: n=%d (shadow=%d)\n", gr->num_lights, gr->num_shadow_lights);
 		{
 			int n2d = 0, ncube = 0;
-			for (int i = 0; i < gr->num_lights && i < GPU_MAX_LIGHTS; i++) {
+			for (int i = 0; i < gr->num_lights && i < GPU_MAX_SHADOW_LIGHTS; i++) {
 				const RE_GPULight *L = &gr->lights[i];
 				if (!L->shadows) continue;
 				if (L->type == GPU_LIGHT_POINT || L->type == GPU_LIGHT_AREA) ncube++; else n2d++;
 			}
 			printf("[GPU] shadow maps: 2d=%d cube=%d\n", n2d, ncube);
 		}
-		for (int i = 0; i < gr->num_lights && i < GPU_MAX_LIGHTS; i++) {
+		for (int i = 0; i < gr->num_lights && i < GPU_MAX_SHADOW_LIGHTS; i++) {
 			const RE_GPULight *L = &gr->lights[i];
 			printf("[GPU-LIGHT] [%d] %-5s color=(%.3f %.3f %.3f) pos=(%.2f %.2f %.2f) "
 			       "dir=(%.2f %.2f %.2f) dist=%.1f falloff=%d sphere=%d spotsi=%.3f "
@@ -1957,7 +1982,7 @@ void RE_gpu_renderer_dump(const RE_GPURenderer *gr)
 		 * видно тип — у солнца орто (m23=0, m33=1), у прожектора перспектива
 		 * (m23=-1, m32=(2fn)/(n-f)). Плюс vp row3 — проверка конечности
 		 * результирующей world->light-clip матрицы. */
-		for (int i = 0; i < gr->num_lights && i < GPU_MAX_LIGHTS; i++) {
+		for (int i = 0; i < gr->num_lights && i < GPU_MAX_SHADOW_LIGHTS; i++) {
 			const RE_GPULight *L = &gr->lights[i];
 			if (!L->shadows) continue;
 			printf("[GPU-SHADOW] [%d] %s proj row0=(%.4f %.4f %.4f %.4f) "
@@ -2249,7 +2274,7 @@ void RE_gpu_renderer_dump(const RE_GPURenderer *gr)
 		 * или в стороне (они не отбрасывают тень вперёд). Если бы их было много,
 		 * это указывало бы на неверный AABB/плоскости. */
 		int sun_culled = 0;
-		for (int i = 0; i < gr->num_lights && i < GPU_MAX_LIGHTS; i++) {
+		for (int i = 0; i < gr->num_lights && i < GPU_MAX_SHADOW_LIGHTS; i++) {
 			const RE_GPULight *L = &gr->lights[i];
 			if (!L->shadows) continue;
 			float spl[6][4];
@@ -2342,7 +2367,8 @@ typedef struct RE_GPUGPURes {
 	/* ★ M19: процедурная карта цвета (CLOUDS/BLEND) */
 	GLint gb_u_proc_type, gb_u_proc_stype, gb_u_proc_flip;
 	GLint gb_u_proc_col;   /* M20 */
-	GLint gb_u_proc_noisesize, gb_u_proc_noisedepth, gb_u_proc_basis, gb_u_proc_hard;
+	GLint gb_u_proc_noisesize, gb_u_proc_noisedepth, gb_u_proc_basis, gb_u_proc_wf, gb_u_proc_hard;
+	GLint gb_u_proc_dist;
 	GLint gb_u_proc_bright, gb_u_proc_contrast, gb_u_proc_noclamp;
 	GLint gb_u_proc_has_ramp, gb_u_proc_ramp, gb_u_proc_hash, gb_u_proc_hashv;
 	GLint gb_u_proc_hashp;   /* M20: Voronoi feature points (hashpntf) */
@@ -2350,7 +2376,8 @@ typedef struct RE_GPUGPURes {
 	/* ★ M22: вторая процедурная текстура (слот != 0) — источник MAP_SPEC/MAP_HAR */
 	GLint gb_u_has_proc2;
 	GLint gb_u_proc2_type, gb_u_proc2_stype, gb_u_proc2_flip;
-	GLint gb_u_proc2_noisesize, gb_u_proc2_noisedepth, gb_u_proc2_basis, gb_u_proc2_hard;
+	GLint gb_u_proc2_noisesize, gb_u_proc2_noisedepth, gb_u_proc2_basis, gb_u_proc2_wf, gb_u_proc2_hard;
+	GLint gb_u_proc2_dist;
 	GLint gb_u_proc2_bright, gb_u_proc2_contrast, gb_u_proc2_noclamp;
 	GLint gb_u_proc2_has_ramp, gb_u_proc2_ramp;
 	GLint gb_u_proc2_orco, gb_u_proc2_size, gb_u_proc2_ofs;
@@ -2388,40 +2415,54 @@ typedef struct RE_GPUGPURes {
 	GLuint tex_white;   /* 1x1 белая — подставляется, когда у материала нет карты */
 	GLuint tex_spec_def;/* 1x1: белый блик + hardness по умолчанию BI (50) — когда 4-й цели нет */
 
-	/* ★ Теневые карты: по одной на каждую лампу (все GPU_MAX_LIGHTS, даже если
+	/* ★ Теневые карты: по одной на каждую лампу (все GPU_MAX_SHADOW_LIGHTS, даже если
 	 * тень дают не все — так нет зависимости от порядка сбора света). Упакованная
 	 * window-глубина в color + depth renderbuffer. Лампа i использует tex_shadow[i].
 	 * Программа одна (prog_shadow), её uniform u_lightvp ставится на каждый проход. */
-	GLuint shadow_fb[GPU_MAX_LIGHTS];
-	GLuint tex_shadow[GPU_MAX_LIGHTS];
-	GLuint rb_shadow[GPU_MAX_LIGHTS];
+	GLuint shadow_fb[GPU_MAX_SHADOW_LIGHTS];
+	GLuint tex_shadow[GPU_MAX_SHADOW_LIGHTS];
+	GLuint rb_shadow[GPU_MAX_SHADOW_LIGHTS];
 	GLuint prog_shadow;
 	GLint shadow_a_co, shadow_u_lightvp, shadow_u_obmat;
 	/* ★ POINT: кубическая карта на каждую лампу (6 граней в одной текстуре).
 	 * shadow_fb[si]/rb_shadow[si] переиспользуются — перед рендером грани k
 	 * color-attachment переключается на GL_TEXTURE_CUBE_MAP_*_k. tex_cube_white —
 	 * заглушка 1x1 для не-point ламп (samplerCube обязан быть привязан). */
-	GLuint tex_shadow_cube[GPU_MAX_LIGHTS];
+	GLuint tex_shadow_cube[GPU_MAX_SHADOW_LIGHTS];
 	GLuint tex_cube_white;
+
+	/* ★★ Раунд 16: данные ВСЕХ ламп одной float-текстурой — вместо per-light
+	 * юниформов u_lpos/u_ldir/u_lcol/u_lfl (те кончались на 10 лампах, потому что
+	 * упирались в лимит uniform-компонентов). Формат — RGBA32F, ширина = число
+	 * ламп, высота GPU_LIGHT_DATA_ROWS (4):
+	 *   строка 0: pos.x pos.y pos.z type
+	 *   строка 1: dir.x dir.y dir.z dist
+	 *   строка 2: col.r col.g col.b falloff
+	 *   строка 3: sphere spotsi spotbl soft
+	 * Шейдер читает её через gpu_ltap(i, row) с GL_NEAREST по центрам текселей,
+	 * а u_light_texel = (1/ширина, 1/высота) передаётся юниформом. */
+	GLuint tex_lights;
+	int tex_lights_w;      /* текущая ширина (в лампах); 0 — текстура не создана */
+	float *light_buf;      /* CPU-буфер выгрузки (переиспользуется между кадрами) */
+	int light_buf_cap;
 
 	/* шейдер деферред-освещения */
 	GLuint prog_light;
 	GLint light_a_pos, light_a_uv;
 	GLint light_u_albedo, light_u_nrm;
 	GLint light_u_num_lights, light_u_exposure;
-	GLint light_u_lpos[GPU_MAX_LIGHTS], light_u_ldir[GPU_MAX_LIGHTS];
-	GLint light_u_lcol[GPU_MAX_LIGHTS], light_u_lfl[GPU_MAX_LIGHTS];
+	GLint light_u_lightdata, light_u_lighttexel;   /* ★ раунд 16 */
 	GLint light_u_world_hor, light_u_world_zen, light_u_world_amb;
 	GLint light_u_world_blend, light_u_amb_fill;
 	GLint light_u_env_light, light_u_env_energy;   /* M26: Environment Lighting */
 	GLint light_u_linfac, light_u_logfac, light_u_expo_on;
 	GLint light_u_depth, light_u_invproj, light_u_invview;
-	GLint light_u_shadow[GPU_MAX_LIGHTS];   /* теневая карта каждой лампы */
-	GLint light_u_lvp[GPU_MAX_LIGHTS];      /* world->light-clip каждой лампы */
-	GLint light_u_shadow_cube[GPU_MAX_LIGHTS]; /* point: кубическая карта лампы */
-	GLint light_u_lwpos[GPU_MAX_LIGHTS];    /* point: мировая позиция света */
-	GLint light_u_lpz[GPU_MAX_LIGHTS];      /* point: (A,B) window-глубины */
-	GLint light_u_lsoft[GPU_MAX_LIGHTS];    /* мягкость тени лампы (lar->soft) */
+	GLint light_u_shadow[GPU_MAX_SHADOW_LIGHTS];   /* теневая карта каждой лампы */
+	GLint light_u_lvp[GPU_MAX_SHADOW_LIGHTS];      /* world->light-clip каждой лампы */
+	GLint light_u_shadow_cube[GPU_MAX_SHADOW_LIGHTS]; /* point: кубическая карта лампы */
+	GLint light_u_lwpos[GPU_MAX_SHADOW_LIGHTS];    /* point: мировая позиция света */
+	GLint light_u_lpz[GPU_MAX_SHADOW_LIGHTS];      /* point: (A,B) window-глубины */
+	/* ★ раунд 16: light_u_lsoft убран — soft едет в строке 4 u_light_data */
 	GLint light_u_spec;    /* M5: цвет блика + hardness */
 	GLint light_u_refl;    /* M17: сила отражения (MAP_REFL) */
 	GLint light_u_pack;
@@ -2441,11 +2482,10 @@ typedef struct RE_GPUGPURes {
 	GLint fw_u_amb_fill, fw_u_up, fw_u_world_hor, fw_u_world_zen, fw_u_world_amb;
 	GLint fw_u_world_blend, fw_u_num_lights;
 	GLint fw_u_env_light, fw_u_env_energy;         /* M26: Environment Lighting */
-	GLint fw_u_lpos[GPU_MAX_LIGHTS], fw_u_ldir[GPU_MAX_LIGHTS];
-	GLint fw_u_lcol[GPU_MAX_LIGHTS], fw_u_lfl[GPU_MAX_LIGHTS];
-	GLint fw_u_shadow[GPU_MAX_LIGHTS], fw_u_lvp[GPU_MAX_LIGHTS];
-	GLint fw_u_shadow_cube[GPU_MAX_LIGHTS], fw_u_lwpos[GPU_MAX_LIGHTS];
-	GLint fw_u_lpz[GPU_MAX_LIGHTS], fw_u_lsoft[GPU_MAX_LIGHTS];
+	GLint fw_u_lightdata, fw_u_lighttexel;   /* ★ раунд 16: та же текстура ламп */
+	GLint fw_u_shadow[GPU_MAX_SHADOW_LIGHTS], fw_u_lvp[GPU_MAX_SHADOW_LIGHTS];
+	GLint fw_u_shadow_cube[GPU_MAX_SHADOW_LIGHTS], fw_u_lwpos[GPU_MAX_SHADOW_LIGHTS];
+	GLint fw_u_lpz[GPU_MAX_SHADOW_LIGHTS];   /* ★ раунд 16: fw_u_lsoft убран */
 	GLint fw_u_pcf, fw_u_shadow_texel, fw_u_depth, fw_u_resolution, fw_u_pack;
 	GLint fw_u_shadow_bias;   /* раунд 83: множитель мирового bias теней */
 	GLint fw_u_ortho;         /* раунд 83-fix: 1 = ортокамера */
@@ -2458,7 +2498,8 @@ typedef struct RE_GPUGPURes {
 	GLint fw_u_proc_type, fw_u_proc_stype, fw_u_proc_flip;
 	GLint fw_u_proc_col;   /* M20 */
 	GLint fw_u_tex_rgbtoint;   /* ★ раунд 83-fix3 */
-	GLint fw_u_proc_noisesize, fw_u_proc_noisedepth, fw_u_proc_basis, fw_u_proc_hard;
+	GLint fw_u_proc_noisesize, fw_u_proc_noisedepth, fw_u_proc_basis, fw_u_proc_wf, fw_u_proc_hard;
+	GLint fw_u_proc_dist;
 	GLint fw_u_proc_bright, fw_u_proc_contrast, fw_u_proc_noclamp;
 	GLint fw_u_proc_has_ramp, fw_u_proc_ramp, fw_u_proc_hash, fw_u_proc_hashv;
 	GLint fw_u_proc_hashp;   /* M20: Voronoi feature points (hashpntf) */
@@ -2524,14 +2565,14 @@ static void gl_print_caps(void)
 	       (int)GLEW_ARB_texture_float,
 	       (int)GLEW_EXT_framebuffer_object,
 	       (int)GLEW_ARB_draw_buffers);
-	/* ★ Сэмплеры на лампу: 2D-тень (юнит 6+i) + кубическая (6+GPU_MAX_LIGHTS+i) в
-	 * проходе света; в forward — 10+i и 10+GPU_MAX_LIGHTS+i. Нужно
-	 * 6 + 2*GPU_MAX_LIGHTS и 10 + 2*GPU_MAX_LIGHTS юнитов соответственно: при
+	/* ★ Сэмплеры на лампу: 2D-тень (юнит 6+i) + кубическая (6+GPU_MAX_SHADOW_LIGHTS+i) в
+	 * проходе света; в forward — 10+i и 10+GPU_MAX_SHADOW_LIGHTS+i. Нужно
+	 * 6 + 2*GPU_MAX_SHADOW_LIGHTS и 10 + 2*GPU_MAX_SHADOW_LIGHTS юнитов соответственно: при
 	 * нехватке линковка шейдера падает и проход молча отменяется (кадр чёрный). */
 	printf("[GPU-CAPS] max_texture_image_units=%d (нужно %d для света, %d для forward "
-	       "при GPU_MAX_LIGHTS=%d)%s\n",
-	       maxtex, 6 + 2 * GPU_MAX_LIGHTS, 10 + 2 * GPU_MAX_LIGHTS, GPU_MAX_LIGHTS,
-	       (maxtex < 10 + 2 * GPU_MAX_LIGHTS)
+	       "при GPU_MAX_SHADOW_LIGHTS=%d)%s\n",
+	       maxtex, 6 + 2 * GPU_MAX_SHADOW_LIGHTS, 10 + 2 * GPU_MAX_SHADOW_LIGHTS, GPU_MAX_SHADOW_LIGHTS,
+	       (maxtex < 10 + 2 * GPU_MAX_SHADOW_LIGHTS)
 	           ? " — НЕ ХВАТАЕТ, часть ламп не получит теней/света!" : "");
 }
 
@@ -2862,6 +2903,8 @@ static const char *GB_FS =
 	"uniform float u_proc_noisesize;\n"
 	"uniform int u_proc_noisedepth;\n"
 	"uniform int u_proc_basis;\n"
+	"uniform int u_proc_wf;\n"           /* ★ M31: waveform WOOD: 0=SIN,1=SAW,2=TRI */
+	"uniform float u_proc_dist;\n"       /* ★ M31: DISTORTED_NOISE tex->dist_amount */
 	"uniform int u_proc_hard;\n"
 	"uniform float u_proc_bright;\n"
 	"uniform float u_proc_contrast;\n"
@@ -2890,9 +2933,9 @@ static const char *GB_FS =
 	"}\n"
 	"vec3 gpu_p_hashp(int i){ return texture2D(u_proc_hashp, vec2((float(i)+0.5)/256.0, 0.5)).rgb; }\n"
 	/* Возвращает (F1, F2) — два ближайших расстояния Voronoi (dist_Real, dtype=0). */
-	"vec2 gpu_p_voronoi2(float x, float y, float z){\n"
+	"vec4 gpu_p_voronoi4(float x, float y, float z){\n"
 	"  int xi=int(floor(x)), yi=int(floor(y)), zi=int(floor(z));\n"
-	"  float d0=1e10, d1=1e10;\n"
+	"  float d0=1e10, d1=1e10, d2=1e10, d3=1e10;\n"
 	"  for (int ox=-1; ox<=1; ox++) {\n"
 	"    for (int oy=-1; oy<=1; oy++) {\n"
 	"      for (int oz=-1; oz<=1; oz++) {\n"
@@ -2901,12 +2944,14 @@ static const char *GB_FS =
 	"        float yd = y - (p.y + float(yi+oy));\n"
 	"        float zd = z - (p.z + float(zi+oz));\n"
 	"        float d = sqrt(xd*xd + yd*yd + zd*zd);\n"
-	"        if (d < d0) { d1 = d0; d0 = d; }\n"
-	"        else if (d < d1) { d1 = d; }\n"
+	"        if (d < d0) { d3 = d2; d2 = d1; d1 = d0; d0 = d; }\n"
+	"        else if (d < d1) { d3 = d2; d2 = d1; d1 = d; }\n"
+	"        else if (d < d2) { d3 = d2; d2 = d; }\n"
+	"        else if (d < d3) { d3 = d; }\n"
 	"      }\n"
 	"    }\n"
 	"  }\n"
-	"  return vec2(d0, d1);\n"
+	"  return vec4(d0, d1, d2, d3);\n"
 	"}\n"
 	/* orgBlenderNoise (noise.c:315) — 1:1; hash[]/hashvectf[] берутся из текстур. */
 	"float gpu_p_orgnoise(float x, float y, float z){\n"
@@ -2948,12 +2993,14 @@ static const char *GB_FS =
 	"  for (int i = 0; i < 8; i++) {\n"
 	"    if (i > oct) break;\n"
 	"    float t;\n"
-	"    vec2 vv = vec2(0.0);\n"
-	"    if (basis == 8 || basis == 3 || basis == 4 || basis == 7)\n"
-	"      vv = gpu_p_voronoi2(fs*x, fs*y, fs*z);\n"
+	"    vec4 vv = vec4(0.0);\n"
+	"    if (basis == 8 || basis == 3 || basis == 4 || basis == 5 || basis == 6 || basis == 7)\n"
+	"      vv = gpu_p_voronoi4(fs*x, fs*y, fs*z);\n"
 	"    if (basis == 8) t = clamp(10.0*(vv.y - vv.x), 0.0, 1.0);\n"
 	"    else if (basis == 3) t = vv.x;\n"
 	"    else if (basis == 4) t = vv.y;\n"
+	"    else if (basis == 5) t = vv.z;\n"
+	"    else if (basis == 6) t = vv.w;\n"
 	"    else if (basis == 7) t = vv.y - vv.x;\n"
 	"    else t = gpu_p_orgnoise(fs*x, fs*y, fs*z);\n"
 	"    if (hard == 1) t = abs(2.0*t - 1.0);\n"
@@ -2981,13 +3028,43 @@ static const char *GB_FS =
 	"  return t;\n"
 	"}\n"
 	/* Весь слот: texco -> texfunc -> BRICONT -> колорбэнд -> (rgb=tcol, a=tin). */
+	"/* ★ M31: signed noise bases for mg_VLNoise (noise.c:1290 voronoi_F*S). */\n"
+	"float gpu_p_ns(float x, float y, float z, int b){\n"
+	"  if (b == 3) return 2.0*gpu_p_voronoi4(x,y,z).x - 1.0;\n"
+	"  if (b == 4) return 2.0*gpu_p_voronoi4(x,y,z).y - 1.0;\n"
+	"  if (b == 5) return 2.0*gpu_p_voronoi4(x,y,z).z - 1.0;\n"
+	"  if (b == 6) return 2.0*gpu_p_voronoi4(x,y,z).w - 1.0;\n"
+	"  if (b == 7) { vec4 v = gpu_p_voronoi4(x,y,z); return 2.0*(v.y - v.x) - 1.0; }\n"
+	"  if (b == 8) { vec4 v = gpu_p_voronoi4(x,y,z); float t = min(10.0*(v.y - v.x), 1.0); return 2.0*t - 1.0; }\n"
+	"  return 2.0*gpu_p_orgnoise(x, y, z) - 1.0;\n"
+	"}\n"
+	"/* ★ M31: DISTORTED_NOISE (noise.c:1926 mg_VLNoise / render_texture.c:610 mg_distNoiseTex).\n"
+	"   mapFull: dist=1.0, distortion basis = VORONOI_F4 (tex->noisebasis=6), base = BLENDER_ORIGINAL (noisebasis2=0). */\n"
+	"float gpu_p_distnoise(vec3 tv, float nsize, float dist, int b1, int b2){\n"
+	"  if (nsize != 0.0) { float s = 1.0/nsize; tv *= s; }\n"   /* BI: tmpvec = texvec/noisesize */
+	"  float r0 = gpu_p_ns(tv.x + 13.5, tv.y + 13.5, tv.z + 13.5, b1) * dist;\n"
+	"  float r1 = gpu_p_ns(tv.x, tv.y, tv.z, b1) * dist;\n"
+	"  float r2 = gpu_p_ns(tv.x - 13.5, tv.y - 13.5, tv.z - 13.5, b1) * dist;\n"
+	"  return gpu_p_ns(tv.x + r0, tv.y + r1, tv.z + r2, b2);\n"
+	"}\n"
+	"/* ★ M31: wood (render_texture.c wood_int): для BANDS (stype=0) wi = waveform[wf]((x+y+z)*10).\n"
+	"   wf = tex->noisebasis2: 0=SIN (0.5+0.5*sin), 1=SAW, 2=TRI. mapFull wood — BANDS+SIN. */\n"
+	"float gpu_p_wood(vec3 tv, int wf){\n"
+	"  float a = (tv.x + tv.y + tv.z) * 10.0;\n"
+	"  const float b = 6.28318530718;\n"
+	"  if (wf == 1) { int n = int(a/b); a -= n*b; if (a < 0.0) a += b; return a/b; }\n"
+	"  if (wf == 2) { return 1.0 - 2.0*abs(floor(a/b + 0.5) - a/b); }\n"
+	"  return 0.5 + 0.5*sin(a);\n"
+	"}\n"
 	"vec4 gpu_p_tex_cfg(vec2 uv, vec3 orco, vec3 wpos, vec3 vpos, int porco, vec2 psize, vec2 pofs, int ptype,\n"
-	"                   int pstype, int pflip, float pnsize, int pdepth, int phard, int pbasis,\n"
+	"                   int pstype, int pflip, float pnsize, int pdepth, int phard, int pbasis, int pwf, float pdist,\n"
 	"                   float pcontrast, float pbright, int pnoclamp, int phasramp, sampler2D pramp){\n"
 	"  vec3 co = (porco == 1) ? orco : ((porco == 2) ? wpos : ((porco == 3) ? vpos : vec3(uv, 0.0)));\n"
 	"  vec3 tv = vec3(psize.x*(co.x + pofs.x), psize.y*(co.y + pofs.y), co.z);\n"
 	"  float tin;\n"
 	"  if (ptype == 5) tin = gpu_p_blend(tv, pstype, pflip);\n"
+	"  else if (ptype == 2) tin = gpu_p_wood(tv, pwf);\n"
+	"  else if (ptype == 13) tin = gpu_p_distnoise(tv, pnsize, pdist, pbasis, pwf);\n"
 	"  else tin = gpu_p_turb(pnsize, tv.x, tv.y, tv.z, pdepth, phard, pbasis);\n"
 	"  tin = (tin - 0.5)*pcontrast + pbright - 0.5;\n"   /* BRICONT */
 	"  if (pnoclamp == 0) tin = clamp(tin, 0.0, 1.0);\n"
@@ -2999,7 +3076,7 @@ static const char *GB_FS =
 	"vec4 gpu_p_tex(vec2 uv, vec3 orco, vec3 wpos, vec3 vpos){\n"
 	"  return gpu_p_tex_cfg(uv, orco, wpos, vpos, u_proc_orco, u_proc_size, u_proc_ofs, u_proc_type,\n"
 	"                       u_proc_stype, u_proc_flip, u_proc_noisesize, u_proc_noisedepth,\n"
-	"                       u_proc_hard, u_proc_basis, u_proc_contrast, u_proc_bright,\n"
+	"                       u_proc_hard, u_proc_basis, u_proc_wf, u_proc_dist, u_proc_contrast, u_proc_bright,\n"
 	"                       u_proc_noclamp, u_proc_has_ramp, u_proc_ramp);\n"
 	"}\n"
 	/* ★ M22: вторая процедурная текстура (слот != 0) — источник MAP_SPEC/MAP_HAR.
@@ -3012,6 +3089,8 @@ static const char *GB_FS =
 	"uniform float u_proc2_noisesize;\n"
 	"uniform int u_proc2_noisedepth;\n"
 	"uniform int u_proc2_basis;\n"
+	"uniform int u_proc2_wf;\n"
+	"uniform float u_proc2_dist;\n"
 	"uniform int u_proc2_hard;\n"
 	"uniform float u_proc2_bright;\n"
 	"uniform float u_proc2_contrast;\n"
@@ -3024,7 +3103,7 @@ static const char *GB_FS =
 	"vec4 gpu_p_tex2(vec2 uv, vec3 orco, vec3 wpos, vec3 vpos){\n"
 	"  return gpu_p_tex_cfg(uv, orco, wpos, vpos, u_proc2_orco, u_proc2_size, u_proc2_ofs, u_proc2_type,\n"
 	"                       u_proc2_stype, u_proc2_flip, u_proc2_noisesize, u_proc2_noisedepth,\n"
-	"                       u_proc2_hard, u_proc2_basis, u_proc2_contrast, u_proc2_bright,\n"
+	"                       u_proc2_hard, u_proc2_basis, u_proc2_wf, u_proc2_dist, u_proc2_contrast, u_proc2_bright,\n"
 	"                       u_proc2_noclamp, u_proc2_has_ramp, u_proc2_ramp);\n"
 	"}\n"
 	/* ★ M23: MAP_NORM от ПРОЦЕДУРНОЙ карты (bump).
@@ -3150,7 +3229,7 @@ static const char *GB_FS =
 	"  if (u_has_proc_nrm > 0.5) {\n"
 	"    float hb = (u_proc_nrm_src == 1) ? gpu_p_tex2(v_uv_tex, v_orco, v_wpos, v_vpos).a\n"
 	"                                    : gpu_p_tex(v_uv_tex, v_orco, v_wpos, v_vpos).a;\n"
-	"    n = gpu_bump(n, v_vpos, hb, u_proc_norfac);\n"
+	"    n = gpu_bump(n, v_vpos, hb, u_proc_norfac * u_bump_scale);\n"
 	"  }\n"
 	"  /* ★ M25 (раунд 82): множитель shi->refl = ma->ref применяем ЗДЕСЬ, к albedo,\n"
 	"     ровно как BI применяет его к shi->rcol перед светом. Тогда и диффуз\n"
@@ -3242,10 +3321,18 @@ static const char *LIGHT_FS =
 	"/* ★ Лампы. Собираются в gpu_gather_lights; для каждой — те же величины, что\n"
 	"   BI кладёт в LampRen, чтобы затухание считалось как в lamp_get_visibility(). */\n"
 	"uniform int u_num_lights;\n"
-	"uniform vec4 u_lpos[10];\n"  /* xyz = позиция (point/spot/area) или направление (sun); w = тип */
-	"uniform vec4 u_ldir[10];\n"  /* xyz = направление spot (view-space); w = lar->dist */
-	"uniform vec4 u_lcol[10];\n"  /* rgb = цвет лампы (уже с energy); a = тип затухания */
-	"uniform vec4 u_lfl[10];\n"   /* x = sphere, y = spotsi, z = spotbl */
+	"/* ★★ Раунд 16: данные ламп — float-текстурой, а не per-light юниформами.\n"
+	"   GPU_LIGHT_DATA_ROWS текселей RGBA32F на лампу:\n"
+	"     0: pos.xyz, type   1: dir.xyz, dist   2: col.rgb, falloff\n"
+	"     3: sphere, spotsi, spotbl, shadows      4: soft\n"
+	"   Так потолок «10 ламп» (лимит uniform-компонентов) снят: число ламп задаёт\n"
+	"   ширина текстуры, а цикл по лампам — динамический. */\n"
+	"uniform sampler2D u_light_data;\n"
+	"uniform vec2 u_light_texel;\n"   /* (1/ширина, 1/GPU_LIGHT_DATA_ROWS) */
+	"vec4 gpu_ltap(int li, int row){\n"
+	"  return texture2D(u_light_data, vec2((float(li) + 0.5) * u_light_texel.x,\n"
+	"                                      (float(row) + 0.5) * u_light_texel.y));\n"
+	"}\n"
 	"/* ★ Мир сцены (re->wrld). Фон — как в BI pixelshading.c:508-545; ambient —\n"
 	"   BI берёт wrld.ambient_color*ma->amb (shadeoutput.c:2000), но у наблюдаемых\n"
 	"   сцен он нулевой, поэтому дополнительно остаётся встроенный fill. */\n"
@@ -3266,7 +3353,7 @@ static const char *LIGHT_FS =
 	"uniform mat4 u_inv_view;\n"     /* view->world (inverse viewmat) */
 	"uniform mat4 u_proj;\n"         /* view->clip (winmat) — для проекции шагов SSR */
 	"uniform mat4 u_lvp[10];\n"       /* world->light-clip каждой лампы (для её тени) */
-	"uniform float u_lsoft[10];\n"    /* мягкость тени лампы (lar->soft, 0..100) */
+	"/* ★ раунд 16: u_lsoft[10] убран — soft едет в строке 4 u_light_data */\n"
 	"uniform int u_debug;\n"         /* 0=свет, 1=albedo, 2=нормаль, 3=упакованная глубина */
 	"uniform float u_pack;\n"        /* 1/clipend — та же нормировка, что в G-буфере */
 	"uniform vec3 u_up;\n"           /* мировой up (0,0,1) в view-space — для полусфер. ambient */
@@ -3565,8 +3652,9 @@ static const char *LIGHT_FS =
 	"     округлением до целого — в BI это int-битовая маска. */\n"
 	"  float nh = dot(N, H);\n"
 	"  float specfac = 0.0;\n"
+	"  float nv = 0.0;\n"
 	"  if (nh > 0.0) {\n"
-	"    float nv = max(dot(N, V), 0.0);\n"
+	"    nv = max(dot(N, V), 0.0);\n"
 	"    specfac = gpu_spec(nh, int(sspec.a * 511.0 + 0.5)) / (0.1 + nv);\n"
 	"  }\n"
 	"  /* BI: t = shadfac[3]*shi->spec*visifac*specfac, затем\n"
@@ -3574,6 +3662,7 @@ static const char *LIGHT_FS =
 	"     alb.a, цвет блика — в sspec.rgb. Раньше здесь была зашита hardness 48\n"
 	"     и множитель 0.8 — ни того, ни другого в BI нет. */\n"
 	"  vec3 spec = sspec.rgb * (alb.a * specfac);\n"
+	"  if (u_debug == 6) return vec3(specfac, nh, nv);\n"
 	"  return (alb.rgb * diff + spec) * colF.rgb * visifac * sh;\n"
 	"}\n"
 	"void main(){\n"
@@ -3600,6 +3689,7 @@ static const char *LIGHT_FS =
 	"\n"
 	"  vec4 albedo = texture2D(u_albedo, v_uv);\n"
 	"  if (u_debug == 1) { gl_FragColor = vec4(albedo.rgb, 1.0); return; }\n"
+	"  if (u_debug == 5) { float si = albedo.a; gl_FragColor = vec4(si, si, si, 1.0); return; }\n"
 	"  /* ★ M5: параметры блика материала (rgb = цвет, a = hardness/511).\n"
 	"     Если 4-й цели MRT нет, сюда подставлена 1x1 текстура с дефолтами BI. */\n"
 	"  vec4 sspec = texture2D(u_spec, v_uv);\n"
@@ -3647,16 +3737,27 @@ static const char *LIGHT_FS =
 	"     GLSL 1.20 не обязан поддерживать динамическую индексацию uniform-массивов,\n"
 	"     поэтому вместо цикла десять вызовов. Тень — отдельно для каждой лампы. */\n"
 	"  vec3 lit = vec3(0.0);\n"
-	"  if (u_num_lights > 0) lit += gpu_light(vpos, n, V, albedo, sspec, u_lpos[0], u_ldir[0], u_lcol[0], u_lfl[0], wp, u_shadow[0], u_lvp[0], u_shadow_cube[0], u_lwpos[0], u_lpz[0], u_lsoft[0]);\n"
-	"  if (u_num_lights > 1) lit += gpu_light(vpos, n, V, albedo, sspec, u_lpos[1], u_ldir[1], u_lcol[1], u_lfl[1], wp, u_shadow[1], u_lvp[1], u_shadow_cube[1], u_lwpos[1], u_lpz[1], u_lsoft[1]);\n"
-	"  if (u_num_lights > 2) lit += gpu_light(vpos, n, V, albedo, sspec, u_lpos[2], u_ldir[2], u_lcol[2], u_lfl[2], wp, u_shadow[2], u_lvp[2], u_shadow_cube[2], u_lwpos[2], u_lpz[2], u_lsoft[2]);\n"
-	"  if (u_num_lights > 3) lit += gpu_light(vpos, n, V, albedo, sspec, u_lpos[3], u_ldir[3], u_lcol[3], u_lfl[3], wp, u_shadow[3], u_lvp[3], u_shadow_cube[3], u_lwpos[3], u_lpz[3], u_lsoft[3]);\n"
-	"  if (u_num_lights > 4) lit += gpu_light(vpos, n, V, albedo, sspec, u_lpos[4], u_ldir[4], u_lcol[4], u_lfl[4], wp, u_shadow[4], u_lvp[4], u_shadow_cube[4], u_lwpos[4], u_lpz[4], u_lsoft[4]);\n"
-	"  if (u_num_lights > 5) lit += gpu_light(vpos, n, V, albedo, sspec, u_lpos[5], u_ldir[5], u_lcol[5], u_lfl[5], wp, u_shadow[5], u_lvp[5], u_shadow_cube[5], u_lwpos[5], u_lpz[5], u_lsoft[5]);\n"
-	"  if (u_num_lights > 6) lit += gpu_light(vpos, n, V, albedo, sspec, u_lpos[6], u_ldir[6], u_lcol[6], u_lfl[6], wp, u_shadow[6], u_lvp[6], u_shadow_cube[6], u_lwpos[6], u_lpz[6], u_lsoft[6]);\n"
-	"  if (u_num_lights > 7) lit += gpu_light(vpos, n, V, albedo, sspec, u_lpos[7], u_ldir[7], u_lcol[7], u_lfl[7], wp, u_shadow[7], u_lvp[7], u_shadow_cube[7], u_lwpos[7], u_lpz[7], u_lsoft[7]);\n"
-	"  if (u_num_lights > 8) lit += gpu_light(vpos, n, V, albedo, sspec, u_lpos[8], u_ldir[8], u_lcol[8], u_lfl[8], wp, u_shadow[8], u_lvp[8], u_shadow_cube[8], u_lwpos[8], u_lpz[8], u_lsoft[8]);\n"
-	"  if (u_num_lights > 9) lit += gpu_light(vpos, n, V, albedo, sspec, u_lpos[9], u_ldir[9], u_lcol[9], u_lfl[9], wp, u_shadow[9], u_lvp[9], u_shadow_cube[9], u_lwpos[9], u_lpz[9], u_lsoft[9]);\n"
+	"  /* ★★ Раунд 16: цикл по ВСЕМ лампам сцены (раньше — жёстко 10 вызовов).\n"
+	"     Данные лампы берём из float-текстуры: gpu_ltap(li,row). Тень умеют только\n"
+	"     первые 10 ламп (GPU_MAX_SHADOW_LIGHTS — их число задано парой сэмплеров на\n"
+	"     лампу), поэтому для li>=10 берётся fl.w=0 и заглушки-сэмплеры:\n"
+	"     ветка тени в gpu_light не исполняется, лампа просто светит. */\n"
+	"  for (int li = 0; li < u_num_lights; li++) {\n"
+	"    vec4 lfl = gpu_ltap(li, 3);        /* sphere, spotsi, spotbl, shadows */\n"
+	"    float lsf = gpu_ltap(li, 4).x;     /* lar->soft — мягкость тени */\n"
+	"    if (li == 0)       lit += gpu_light(vpos, n, V, albedo, sspec, gpu_ltap(0,0), gpu_ltap(0,1), gpu_ltap(0,2), lfl, wp, u_shadow[0], u_lvp[0], u_shadow_cube[0], u_lwpos[0], u_lpz[0], lsf);\n"
+	"    else if (li == 1)  lit += gpu_light(vpos, n, V, albedo, sspec, gpu_ltap(1,0), gpu_ltap(1,1), gpu_ltap(1,2), lfl, wp, u_shadow[1], u_lvp[1], u_shadow_cube[1], u_lwpos[1], u_lpz[1], lsf);\n"
+	"    else if (li == 2)  lit += gpu_light(vpos, n, V, albedo, sspec, gpu_ltap(2,0), gpu_ltap(2,1), gpu_ltap(2,2), lfl, wp, u_shadow[2], u_lvp[2], u_shadow_cube[2], u_lwpos[2], u_lpz[2], lsf);\n"
+	"    else if (li == 3)  lit += gpu_light(vpos, n, V, albedo, sspec, gpu_ltap(3,0), gpu_ltap(3,1), gpu_ltap(3,2), lfl, wp, u_shadow[3], u_lvp[3], u_shadow_cube[3], u_lwpos[3], u_lpz[3], lsf);\n"
+	"    else if (li == 4)  lit += gpu_light(vpos, n, V, albedo, sspec, gpu_ltap(4,0), gpu_ltap(4,1), gpu_ltap(4,2), lfl, wp, u_shadow[4], u_lvp[4], u_shadow_cube[4], u_lwpos[4], u_lpz[4], lsf);\n"
+	"    else if (li == 5)  lit += gpu_light(vpos, n, V, albedo, sspec, gpu_ltap(5,0), gpu_ltap(5,1), gpu_ltap(5,2), lfl, wp, u_shadow[5], u_lvp[5], u_shadow_cube[5], u_lwpos[5], u_lpz[5], lsf);\n"
+	"    else if (li == 6)  lit += gpu_light(vpos, n, V, albedo, sspec, gpu_ltap(6,0), gpu_ltap(6,1), gpu_ltap(6,2), lfl, wp, u_shadow[6], u_lvp[6], u_shadow_cube[6], u_lwpos[6], u_lpz[6], lsf);\n"
+	"    else if (li == 7)  lit += gpu_light(vpos, n, V, albedo, sspec, gpu_ltap(7,0), gpu_ltap(7,1), gpu_ltap(7,2), lfl, wp, u_shadow[7], u_lvp[7], u_shadow_cube[7], u_lwpos[7], u_lpz[7], lsf);\n"
+	"    else if (li == 8)  lit += gpu_light(vpos, n, V, albedo, sspec, gpu_ltap(8,0), gpu_ltap(8,1), gpu_ltap(8,2), lfl, wp, u_shadow[8], u_lvp[8], u_shadow_cube[8], u_lwpos[8], u_lpz[8], lsf);\n"
+	"    else if (li == 9)  lit += gpu_light(vpos, n, V, albedo, sspec, gpu_ltap(9,0), gpu_ltap(9,1), gpu_ltap(9,2), lfl, wp, u_shadow[9], u_lvp[9], u_shadow_cube[9], u_lwpos[9], u_lpz[9], lsf);\n"
+	"    else               lit += gpu_light(vpos, n, V, albedo, sspec, gpu_ltap(li,0), gpu_ltap(li,1), gpu_ltap(li,2), vec4(lfl.xyz, 0.0), wp, u_shadow[0], u_lvp[0], u_shadow_cube[0], u_lwpos[0], u_lpz[0], lsf);\n"
+	"  }\n"
+	"  if (u_debug == 6) { gl_FragColor = vec4(lit.r, lit.r, lit.r, 1.0); return; }\n"
 	"  /* Экспозиция World: BI применяет wrld_exposure_correct к вкладу ЛАМП и лишь\n"
 	"     если exp!=0 или range!=1 (shadeoutput.c:1745, 1960); ambient и эмиссия — мимо.\n"
 	"     u_logfac отрицателен, поэтому exp(lit*logfac) < 1 и результат монотонен. */\n"
@@ -3921,16 +4022,24 @@ static const char *FORWARD_FS =
 	"uniform vec3 u_world_amb;\n"
 	"uniform float u_world_blend;\n"
 	"uniform int u_num_lights;\n"
-	"uniform vec4 u_lpos[10];\n"
-	"uniform vec4 u_ldir[10];\n"
-	"uniform vec4 u_lcol[10];\n"
-	"uniform vec4 u_lfl[10];\n"
+	"/* ★★ Раунд 16: данные ламп — float-текстурой, а не per-light юниформами.\n"
+	"   GPU_LIGHT_DATA_ROWS текселей RGBA32F на лампу:\n"
+	"     0: pos.xyz, type   1: dir.xyz, dist   2: col.rgb, falloff\n"
+	"     3: sphere, spotsi, spotbl, shadows      4: soft\n"
+	"   Так потолок «10 ламп» (лимит uniform-компонентов) снят: число ламп задаёт\n"
+	"   ширина текстуры, а цикл по лампам — динамический. */\n"
+	"uniform sampler2D u_light_data;\n"
+	"uniform vec2 u_light_texel;\n"   /* (1/ширина, 1/GPU_LIGHT_DATA_ROWS) */
+	"vec4 gpu_ltap(int li, int row){\n"
+	"  return texture2D(u_light_data, vec2((float(li) + 0.5) * u_light_texel.x,\n"
+	"                                      (float(row) + 0.5) * u_light_texel.y));\n"
+	"}\n"
 	"uniform sampler2D u_shadow[10];\n"
 	"uniform mat4 u_lvp[10];\n"
 	"uniform samplerCube u_shadow_cube[10];\n"
 	"uniform vec3 u_lwpos[10];\n"
 	"uniform vec2 u_lpz[10];\n"
-	"uniform float u_lsoft[10];\n"
+	"/* ★ раунд 16: u_lsoft[10] убран — soft едет в строке 4 u_light_data */\n"
 	"uniform float u_pcf;\n"
 	"uniform vec2 u_shadow_texel;\n"
 	"uniform float u_shadow_bias;\n"   /* раунд 83-fix: в FORWARD_FS это объявление было
@@ -4313,6 +4422,8 @@ static const char *FORWARD_FS =
 	"uniform float u_proc_noisesize;\n"
 	"uniform int u_proc_noisedepth;\n"
 	"uniform int u_proc_basis;\n"
+	"uniform int u_proc_wf;\n"           /* ★ M31: waveform WOOD: 0=SIN,1=SAW,2=TRI */
+	"uniform float u_proc_dist;\n"       /* ★ M31: DISTORTED_NOISE tex->dist_amount */
 	"uniform int u_proc_hard;\n"
 	"uniform float u_proc_bright;\n"
 	"uniform float u_proc_contrast;\n"
@@ -4338,9 +4449,9 @@ static const char *FORWARD_FS =
 	"}\n"
 	"vec3 gpu_p_hashp(int i){ return texture2D(u_proc_hashp, vec2((float(i)+0.5)/256.0, 0.5)).rgb; }\n"
 	/* Возвращает (F1, F2) — два ближайших расстояния Voronoi (dist_Real, dtype=0). */
-	"vec2 gpu_p_voronoi2(float x, float y, float z){\n"
+	"vec4 gpu_p_voronoi4(float x, float y, float z){\n"
 	"  int xi=int(floor(x)), yi=int(floor(y)), zi=int(floor(z));\n"
-	"  float d0=1e10, d1=1e10;\n"
+	"  float d0=1e10, d1=1e10, d2=1e10, d3=1e10;\n"
 	"  for (int ox=-1; ox<=1; ox++) {\n"
 	"    for (int oy=-1; oy<=1; oy++) {\n"
 	"      for (int oz=-1; oz<=1; oz++) {\n"
@@ -4349,12 +4460,14 @@ static const char *FORWARD_FS =
 	"        float yd = y - (p.y + float(yi+oy));\n"
 	"        float zd = z - (p.z + float(zi+oz));\n"
 	"        float d = sqrt(xd*xd + yd*yd + zd*zd);\n"
-	"        if (d < d0) { d1 = d0; d0 = d; }\n"
-	"        else if (d < d1) { d1 = d; }\n"
+	"        if (d < d0) { d3 = d2; d2 = d1; d1 = d0; d0 = d; }\n"
+	"        else if (d < d1) { d3 = d2; d2 = d1; d1 = d; }\n"
+	"        else if (d < d2) { d3 = d2; d2 = d; }\n"
+	"        else if (d < d3) { d3 = d; }\n"
 	"      }\n"
 	"    }\n"
 	"  }\n"
-	"  return vec2(d0, d1);\n"
+	"  return vec4(d0, d1, d2, d3);\n"
 	"}\n"
 	"float gpu_p_orgnoise(float x, float y, float z){\n"
 	"  float fx=floor(x), fy=floor(y), fz=floor(z);\n"
@@ -4393,12 +4506,14 @@ static const char *FORWARD_FS =
 	"  for (int i = 0; i < 8; i++) {\n"
 	"    if (i > oct) break;\n"
 	"    float t;\n"
-	"    vec2 vv = vec2(0.0);\n"
-	"    if (basis == 8 || basis == 3 || basis == 4 || basis == 7)\n"
-	"      vv = gpu_p_voronoi2(fs*x, fs*y, fs*z);\n"
+	"    vec4 vv = vec4(0.0);\n"
+	"    if (basis == 8 || basis == 3 || basis == 4 || basis == 5 || basis == 6 || basis == 7)\n"
+	"      vv = gpu_p_voronoi4(fs*x, fs*y, fs*z);\n"
 	"    if (basis == 8) t = clamp(10.0*(vv.y - vv.x), 0.0, 1.0);\n"
 	"    else if (basis == 3) t = vv.x;\n"
 	"    else if (basis == 4) t = vv.y;\n"
+	"    else if (basis == 5) t = vv.z;\n"
+	"    else if (basis == 6) t = vv.w;\n"
 	"    else if (basis == 7) t = vv.y - vv.x;\n"
 	"    else t = gpu_p_orgnoise(fs*x, fs*y, fs*z);\n"
 	"    if (hard == 1) t = abs(2.0*t - 1.0);\n"
@@ -4424,13 +4539,43 @@ static const char *FORWARD_FS =
 	"  if (stype == 5) t *= t;\n"
 	"  return t;\n"
 	"}\n"
+	"/* ★ M31: signed noise bases for mg_VLNoise (noise.c:1290 voronoi_F*S). */\n"
+	"float gpu_p_ns(float x, float y, float z, int b){\n"
+	"  if (b == 3) return 2.0*gpu_p_voronoi4(x,y,z).x - 1.0;\n"
+	"  if (b == 4) return 2.0*gpu_p_voronoi4(x,y,z).y - 1.0;\n"
+	"  if (b == 5) return 2.0*gpu_p_voronoi4(x,y,z).z - 1.0;\n"
+	"  if (b == 6) return 2.0*gpu_p_voronoi4(x,y,z).w - 1.0;\n"
+	"  if (b == 7) { vec4 v = gpu_p_voronoi4(x,y,z); return 2.0*(v.y - v.x) - 1.0; }\n"
+	"  if (b == 8) { vec4 v = gpu_p_voronoi4(x,y,z); float t = min(10.0*(v.y - v.x), 1.0); return 2.0*t - 1.0; }\n"
+	"  return 2.0*gpu_p_orgnoise(x, y, z) - 1.0;\n"
+	"}\n"
+	"/* ★ M31: DISTORTED_NOISE (noise.c:1926 mg_VLNoise / render_texture.c:610 mg_distNoiseTex).\n"
+	"   mapFull: dist=1.0, distortion basis = VORONOI_F4 (tex->noisebasis=6), base = BLENDER_ORIGINAL (noisebasis2=0). */\n"
+	"float gpu_p_distnoise(vec3 tv, float nsize, float dist, int b1, int b2){\n"
+	"  if (nsize != 0.0) { float s = 1.0/nsize; tv *= s; }\n"   /* BI: tmpvec = texvec/noisesize */
+	"  float r0 = gpu_p_ns(tv.x + 13.5, tv.y + 13.5, tv.z + 13.5, b1) * dist;\n"
+	"  float r1 = gpu_p_ns(tv.x, tv.y, tv.z, b1) * dist;\n"
+	"  float r2 = gpu_p_ns(tv.x - 13.5, tv.y - 13.5, tv.z - 13.5, b1) * dist;\n"
+	"  return gpu_p_ns(tv.x + r0, tv.y + r1, tv.z + r2, b2);\n"
+	"}\n"
+	"/* ★ M31: wood (render_texture.c wood_int): для BANDS (stype=0) wi = waveform[wf]((x+y+z)*10).\n"
+	"   wf = tex->noisebasis2: 0=SIN (0.5+0.5*sin), 1=SAW, 2=TRI. mapFull wood — BANDS+SIN. */\n"
+	"float gpu_p_wood(vec3 tv, int wf){\n"
+	"  float a = (tv.x + tv.y + tv.z) * 10.0;\n"
+	"  const float b = 6.28318530718;\n"
+	"  if (wf == 1) { int n = int(a/b); a -= n*b; if (a < 0.0) a += b; return a/b; }\n"
+	"  if (wf == 2) { return 1.0 - 2.0*abs(floor(a/b + 0.5) - a/b); }\n"
+	"  return 0.5 + 0.5*sin(a);\n"
+	"}\n"
 	"vec4 gpu_p_tex_cfg(vec2 uv, vec3 orco, vec3 wpos, vec3 vpos, int porco, vec2 psize, vec2 pofs, int ptype,\n"
-	"                   int pstype, int pflip, float pnsize, int pdepth, int phard, int pbasis,\n"
+	"                   int pstype, int pflip, float pnsize, int pdepth, int phard, int pbasis, int pwf, float pdist,\n"
 	"                   float pcontrast, float pbright, int pnoclamp, int phasramp, sampler2D pramp){\n"
 	"  vec3 co = (porco == 1) ? orco : ((porco == 2) ? wpos : ((porco == 3) ? vpos : vec3(uv, 0.0)));\n"
 	"  vec3 tv = vec3(psize.x*(co.x + pofs.x), psize.y*(co.y + pofs.y), co.z);\n"
 	"  float tin;\n"
 	"  if (ptype == 5) tin = gpu_p_blend(tv, pstype, pflip);\n"
+	"  else if (ptype == 2) tin = gpu_p_wood(tv, pwf);\n"
+	"  else if (ptype == 13) tin = gpu_p_distnoise(tv, pnsize, pdist, pbasis, pwf);\n"
 	"  else tin = gpu_p_turb(pnsize, tv.x, tv.y, tv.z, pdepth, phard, pbasis);\n"
 	"  tin = (tin - 0.5)*pcontrast + pbright - 0.5;\n"
 	"  if (pnoclamp == 0) tin = clamp(tin, 0.0, 1.0);\n"
@@ -4442,7 +4587,7 @@ static const char *FORWARD_FS =
 	"vec4 gpu_p_tex(vec2 uv, vec3 orco, vec3 wpos, vec3 vpos){\n"
 	"  return gpu_p_tex_cfg(uv, orco, wpos, vpos, u_proc_orco, u_proc_size, u_proc_ofs, u_proc_type,\n"
 	"                       u_proc_stype, u_proc_flip, u_proc_noisesize, u_proc_noisedepth,\n"
-	"                       u_proc_hard, u_proc_basis, u_proc_contrast, u_proc_bright,\n"
+	"                       u_proc_hard, u_proc_basis, u_proc_wf, u_proc_dist, u_proc_contrast, u_proc_bright,\n"
 	"                       u_proc_noclamp, u_proc_has_ramp, u_proc_ramp);\n"
 	"}\n"
 	"void main(){\n"
@@ -4505,16 +4650,26 @@ static const char *FORWARD_FS =
 	"  /* SSAO: та же окклюзия, что у непрозрачных поверхностей (по глубине сцены). */\n"
 	"  float ao = (u_ao > 0.5) ? gpu_ssao(gl_FragCoord.xy / u_resolution, v_vpos, v_linz, n) : 1.0;\n"
 	"  vec3 lit = vec3(0.0);\n"
-	"  if (u_num_lights > 0) lit += gpu_light(v_vpos, n, V, albedo, sspec, u_lpos[0], u_ldir[0], u_lcol[0], u_lfl[0], wp, u_shadow[0], u_lvp[0], u_shadow_cube[0], u_lwpos[0], u_lpz[0], u_lsoft[0]);\n"
-	"  if (u_num_lights > 1) lit += gpu_light(v_vpos, n, V, albedo, sspec, u_lpos[1], u_ldir[1], u_lcol[1], u_lfl[1], wp, u_shadow[1], u_lvp[1], u_shadow_cube[1], u_lwpos[1], u_lpz[1], u_lsoft[1]);\n"
-	"  if (u_num_lights > 2) lit += gpu_light(v_vpos, n, V, albedo, sspec, u_lpos[2], u_ldir[2], u_lcol[2], u_lfl[2], wp, u_shadow[2], u_lvp[2], u_shadow_cube[2], u_lwpos[2], u_lpz[2], u_lsoft[2]);\n"
-	"  if (u_num_lights > 3) lit += gpu_light(v_vpos, n, V, albedo, sspec, u_lpos[3], u_ldir[3], u_lcol[3], u_lfl[3], wp, u_shadow[3], u_lvp[3], u_shadow_cube[3], u_lwpos[3], u_lpz[3], u_lsoft[3]);\n"
-	"  if (u_num_lights > 4) lit += gpu_light(v_vpos, n, V, albedo, sspec, u_lpos[4], u_ldir[4], u_lcol[4], u_lfl[4], wp, u_shadow[4], u_lvp[4], u_shadow_cube[4], u_lwpos[4], u_lpz[4], u_lsoft[4]);\n"
-	"  if (u_num_lights > 5) lit += gpu_light(v_vpos, n, V, albedo, sspec, u_lpos[5], u_ldir[5], u_lcol[5], u_lfl[5], wp, u_shadow[5], u_lvp[5], u_shadow_cube[5], u_lwpos[5], u_lpz[5], u_lsoft[5]);\n"
-	"  if (u_num_lights > 6) lit += gpu_light(v_vpos, n, V, albedo, sspec, u_lpos[6], u_ldir[6], u_lcol[6], u_lfl[6], wp, u_shadow[6], u_lvp[6], u_shadow_cube[6], u_lwpos[6], u_lpz[6], u_lsoft[6]);\n"
-	"  if (u_num_lights > 7) lit += gpu_light(v_vpos, n, V, albedo, sspec, u_lpos[7], u_ldir[7], u_lcol[7], u_lfl[7], wp, u_shadow[7], u_lvp[7], u_shadow_cube[7], u_lwpos[7], u_lpz[7], u_lsoft[7]);\n"
-	"  if (u_num_lights > 8) lit += gpu_light(v_vpos, n, V, albedo, sspec, u_lpos[8], u_ldir[8], u_lcol[8], u_lfl[8], wp, u_shadow[8], u_lvp[8], u_shadow_cube[8], u_lwpos[8], u_lpz[8], u_lsoft[8]);\n"
-	"  if (u_num_lights > 9) lit += gpu_light(v_vpos, n, V, albedo, sspec, u_lpos[9], u_ldir[9], u_lcol[9], u_lfl[9], wp, u_shadow[9], u_lvp[9], u_shadow_cube[9], u_lwpos[9], u_lpz[9], u_lsoft[9]);\n"
+	"  /* ★★ Раунд 16: цикл по ВСЕМ лампам сцены (раньше — жёстко 10 вызовов).\n"
+	"     Данные лампы берём из float-текстуры: gpu_ltap(li,row). Тень умеют только\n"
+	"     первые 10 ламп (GPU_MAX_SHADOW_LIGHTS — их число задано парой сэмплеров на\n"
+	"     лампу), поэтому для li>=10 берётся fl.w=0 и заглушки-сэмплеры:\n"
+	"     ветка тени в gpu_light не исполняется, лампа просто светит. */\n"
+	"  for (int li = 0; li < u_num_lights; li++) {\n"
+	"    vec4 lfl = gpu_ltap(li, 3);        /* sphere, spotsi, spotbl, shadows */\n"
+	"    float lsf = gpu_ltap(li, 4).x;     /* lar->soft — мягкость тени */\n"
+	"    if (li == 0)       lit += gpu_light(v_vpos, n, V, albedo, sspec, gpu_ltap(0,0), gpu_ltap(0,1), gpu_ltap(0,2), lfl, wp, u_shadow[0], u_lvp[0], u_shadow_cube[0], u_lwpos[0], u_lpz[0], lsf);\n"
+	"    else if (li == 1)  lit += gpu_light(v_vpos, n, V, albedo, sspec, gpu_ltap(1,0), gpu_ltap(1,1), gpu_ltap(1,2), lfl, wp, u_shadow[1], u_lvp[1], u_shadow_cube[1], u_lwpos[1], u_lpz[1], lsf);\n"
+	"    else if (li == 2)  lit += gpu_light(v_vpos, n, V, albedo, sspec, gpu_ltap(2,0), gpu_ltap(2,1), gpu_ltap(2,2), lfl, wp, u_shadow[2], u_lvp[2], u_shadow_cube[2], u_lwpos[2], u_lpz[2], lsf);\n"
+	"    else if (li == 3)  lit += gpu_light(v_vpos, n, V, albedo, sspec, gpu_ltap(3,0), gpu_ltap(3,1), gpu_ltap(3,2), lfl, wp, u_shadow[3], u_lvp[3], u_shadow_cube[3], u_lwpos[3], u_lpz[3], lsf);\n"
+	"    else if (li == 4)  lit += gpu_light(v_vpos, n, V, albedo, sspec, gpu_ltap(4,0), gpu_ltap(4,1), gpu_ltap(4,2), lfl, wp, u_shadow[4], u_lvp[4], u_shadow_cube[4], u_lwpos[4], u_lpz[4], lsf);\n"
+	"    else if (li == 5)  lit += gpu_light(v_vpos, n, V, albedo, sspec, gpu_ltap(5,0), gpu_ltap(5,1), gpu_ltap(5,2), lfl, wp, u_shadow[5], u_lvp[5], u_shadow_cube[5], u_lwpos[5], u_lpz[5], lsf);\n"
+	"    else if (li == 6)  lit += gpu_light(v_vpos, n, V, albedo, sspec, gpu_ltap(6,0), gpu_ltap(6,1), gpu_ltap(6,2), lfl, wp, u_shadow[6], u_lvp[6], u_shadow_cube[6], u_lwpos[6], u_lpz[6], lsf);\n"
+	"    else if (li == 7)  lit += gpu_light(v_vpos, n, V, albedo, sspec, gpu_ltap(7,0), gpu_ltap(7,1), gpu_ltap(7,2), lfl, wp, u_shadow[7], u_lvp[7], u_shadow_cube[7], u_lwpos[7], u_lpz[7], lsf);\n"
+	"    else if (li == 8)  lit += gpu_light(v_vpos, n, V, albedo, sspec, gpu_ltap(8,0), gpu_ltap(8,1), gpu_ltap(8,2), lfl, wp, u_shadow[8], u_lvp[8], u_shadow_cube[8], u_lwpos[8], u_lpz[8], lsf);\n"
+	"    else if (li == 9)  lit += gpu_light(v_vpos, n, V, albedo, sspec, gpu_ltap(9,0), gpu_ltap(9,1), gpu_ltap(9,2), lfl, wp, u_shadow[9], u_lvp[9], u_shadow_cube[9], u_lwpos[9], u_lpz[9], lsf);\n"
+	"    else               lit += gpu_light(v_vpos, n, V, albedo, sspec, gpu_ltap(li,0), gpu_ltap(li,1), gpu_ltap(li,2), vec4(lfl.xyz, 0.0), wp, u_shadow[0], u_lvp[0], u_shadow_cube[0], u_lwpos[0], u_lpz[0], lsf);\n"
+	"  }\n"
 	"  if (u_expo_on > 0.5) lit = u_linfac * (1.0 - exp(lit * u_logfac));\n"
 	"  vec3 col = base * amb * ao + lit;\n"
 	"  col *= u_exposure;\n"
@@ -4553,12 +4708,15 @@ static void gpu_res_free(RE_GPUGPURes *r)
 	if (r->fb)         glDeleteFramebuffersEXT(1, &r->fb);
 	if (r->quad_vbo)   glDeleteBuffers(1, &r->quad_vbo);
 	if (r->quad_ibo)   glDeleteBuffers(1, &r->quad_ibo);
-	for (int i = 0; i < GPU_MAX_LIGHTS; i++) {
+	for (int i = 0; i < GPU_MAX_SHADOW_LIGHTS; i++) {
 		if (r->tex_shadow[i])  glDeleteTextures(1, &r->tex_shadow[i]);
 		if (r->tex_shadow_cube[i]) glDeleteTextures(1, &r->tex_shadow_cube[i]);
 		if (r->rb_shadow[i])   glDeleteRenderbuffersEXT(1, &r->rb_shadow[i]);
 		if (r->shadow_fb[i])   glDeleteFramebuffersEXT(1, &r->shadow_fb[i]);
 	}
+	/* ★ раунд 16: текстура данных ламп и её CPU-буфер выгрузки */
+	if (r->tex_lights) glDeleteTextures(1, &r->tex_lights);
+	if (r->light_buf)  MEM_freeN(r->light_buf);
 
 	memset(r, 0, sizeof(*r));
 }
@@ -4931,11 +5089,11 @@ int RE_gpu_renderer_gl_init(RE_GPURenderer *gr, int width, int height)
 	}
 	glBindTexture(GL_TEXTURE_2D, 0);
 
-	/* --- ★ Теневые карты: по одной на каждую лампу (все GPU_MAX_LIGHTS, чтобы не
+	/* --- ★ Теневые карты: по одной на каждую лампу (все GPU_MAX_SHADOW_LIGHTS, чтобы не
 	 * зависеть от того, какие лампы дают тень в ЭТОЙ сцене). Каждая — упакованная
 	 * window-глубина в color + depth renderbuffer, как раньше, только в массиве. --- */
 	const int shw = GPU_SHADOW_SIZE, shh = GPU_SHADOW_SIZE;
-	for (int si = 0; si < GPU_MAX_LIGHTS; si++) {
+	for (int si = 0; si < GPU_MAX_SHADOW_LIGHTS; si++) {
 		glGenTextures(1, &r->tex_shadow[si]);
 		glBindTexture(GL_TEXTURE_2D, r->tex_shadow[si]);
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, shw, shh, 0, GL_RGBA,
@@ -4972,7 +5130,7 @@ int RE_gpu_renderer_gl_init(RE_GPURenderer *gr, int width, int height)
 	 * renderbuffer переиспользуются из цикла выше: перед рендером грани k меняем
 	 * color-attachment на GL_TEXTURE_CUBE_MAP_*_k. Заглушка tex_cube_white —
 	 * samplerCube в шейдере обязан быть привязан (даже если не сэмплится). --- */
-	for (int si = 0; si < GPU_MAX_LIGHTS; si++) {
+	for (int si = 0; si < GPU_MAX_SHADOW_LIGHTS; si++) {
 		glGenTextures(1, &r->tex_shadow_cube[si]);
 		glBindTexture(GL_TEXTURE_CUBE_MAP, r->tex_shadow_cube[si]);
 		for (int face = 0; face < 6; face++) {
@@ -5106,6 +5264,8 @@ int RE_gpu_renderer_gl_init(RE_GPURenderer *gr, int width, int height)
 	r->gb_u_proc_noisesize = glGetUniformLocation(r->prog_gb, "u_proc_noisesize");
 	r->gb_u_proc_noisedepth = glGetUniformLocation(r->prog_gb, "u_proc_noisedepth");
 	r->gb_u_proc_basis = glGetUniformLocation(r->prog_gb, "u_proc_basis");
+	r->gb_u_proc_wf = glGetUniformLocation(r->prog_gb, "u_proc_wf");
+	r->gb_u_proc_dist = glGetUniformLocation(r->prog_gb, "u_proc_dist");
 	r->gb_u_proc_hard = glGetUniformLocation(r->prog_gb, "u_proc_hard");
 	r->gb_u_proc_bright = glGetUniformLocation(r->prog_gb, "u_proc_bright");
 	r->gb_u_proc_contrast = glGetUniformLocation(r->prog_gb, "u_proc_contrast");
@@ -5126,6 +5286,8 @@ int RE_gpu_renderer_gl_init(RE_GPURenderer *gr, int width, int height)
 	r->gb_u_proc2_noisesize = glGetUniformLocation(r->prog_gb, "u_proc2_noisesize");
 	r->gb_u_proc2_noisedepth = glGetUniformLocation(r->prog_gb, "u_proc2_noisedepth");
 	r->gb_u_proc2_basis = glGetUniformLocation(r->prog_gb, "u_proc2_basis");
+	r->gb_u_proc2_wf = glGetUniformLocation(r->prog_gb, "u_proc2_wf");
+	r->gb_u_proc2_dist = glGetUniformLocation(r->prog_gb, "u_proc2_dist");
 	r->gb_u_proc2_hard = glGetUniformLocation(r->prog_gb, "u_proc2_hard");
 	r->gb_u_proc2_bright = glGetUniformLocation(r->prog_gb, "u_proc2_bright");
 	r->gb_u_proc2_contrast = glGetUniformLocation(r->prog_gb, "u_proc2_contrast");
@@ -5378,27 +5540,21 @@ int RE_gpu_renderer_gl_init(RE_GPURenderer *gr, int width, int height)
 		printf("[GPU] !! u_num_lights=%d u_exposure=%d — лампы в шейдер не попадут!\n",
 		       (int)r->light_u_num_lights, (int)r->light_u_exposure);
 	}
-	/* локации элементов uniform-массивов запрашиваем поимённо ("u_lpos[1]" и т.д.):
-	 * так расхождение имени/размера сразу видно, а не превращается в тихий -1 */
-	for (int i = 0; i < GPU_MAX_LIGHTS; i++) {
-		char nm[32];
-		sprintf(nm, "u_lpos[%d]", i); r->light_u_lpos[i] = glGetUniformLocation(r->prog_light, nm);
-		sprintf(nm, "u_ldir[%d]", i); r->light_u_ldir[i] = glGetUniformLocation(r->prog_light, nm);
-		sprintf(nm, "u_lcol[%d]", i); r->light_u_lcol[i] = glGetUniformLocation(r->prog_light, nm);
-		sprintf(nm, "u_lfl[%d]", i);  r->light_u_lfl[i]  = glGetUniformLocation(r->prog_light, nm);
-		if (r->light_u_lpos[i] < 0 || r->light_u_ldir[i] < 0 ||
-		    r->light_u_lcol[i] < 0 || r->light_u_lfl[i] < 0) {
-			printf("[GPU] !! uniform-массивы ламп[%d] не найдены в шейдере "
-			       "(lpos=%d ldir=%d lcol=%d lfl=%d)\n", i,
-			       (int)r->light_u_lpos[i], (int)r->light_u_ldir[i],
-			       (int)r->light_u_lcol[i], (int)r->light_u_lfl[i]);
-		}
+	/* ★★ Раунд 16: per-light юниформы u_lpos/u_ldir/u_lcol/u_lfl/u_lsoft УБРАНЫ.
+	 * Данные ВСЕХ ламп идут float-текстурой u_light_data (см. LIGHT_FS), поэтому
+	 * запрашиваем только её локации — это и есть снятие потолка «10 ламп». */
+	r->light_u_lightdata = glGetUniformLocation(r->prog_light, "u_light_data");
+	r->light_u_lighttexel = glGetUniformLocation(r->prog_light, "u_light_texel");
+	if (r->light_u_lightdata < 0 || r->light_u_lighttexel < 0) {
+		printf("[GPU] !! u_light_data=%d u_light_texel=%d — данные ламп НЕ попадут "
+		       "в шейдер (останется только ambient)!\n",
+		       (int)r->light_u_lightdata, (int)r->light_u_lighttexel);
 	}
 	r->light_u_depth = glGetUniformLocation(r->prog_light, "u_depth");
 	r->light_u_spec = glGetUniformLocation(r->prog_light, "u_spec");
 	r->light_u_refl = glGetUniformLocation(r->prog_light, "u_refl");
 	/* ★ Теневые карты и матрицы — по имени элемента массива, как и лампы. */
-	for (int i = 0; i < GPU_MAX_LIGHTS; i++) {
+	for (int i = 0; i < GPU_MAX_SHADOW_LIGHTS; i++) {
 		char nm[32];
 		sprintf(nm, "u_shadow[%d]", i);
 		r->light_u_shadow[i] = glGetUniformLocation(r->prog_light, nm);
@@ -5410,16 +5566,14 @@ int RE_gpu_renderer_gl_init(RE_GPURenderer *gr, int width, int height)
 		r->light_u_lwpos[i] = glGetUniformLocation(r->prog_light, nm);
 		sprintf(nm, "u_lpz[%d]", i);
 		r->light_u_lpz[i] = glGetUniformLocation(r->prog_light, nm);
-		sprintf(nm, "u_lsoft[%d]", i);
-		r->light_u_lsoft[i] = glGetUniformLocation(r->prog_light, nm);
 		if (r->light_u_shadow[i] < 0 || r->light_u_lvp[i] < 0 ||
 		    r->light_u_shadow_cube[i] < 0 || r->light_u_lwpos[i] < 0 ||
-		    r->light_u_lpz[i] < 0 || r->light_u_lsoft[i] < 0) {
+		    r->light_u_lpz[i] < 0) {
 			printf("[GPU] !! uniform тени лампы[%d] не найден (shadow=%d lvp=%d "
-			       "cube=%d wpos=%d pz=%d soft=%d)\n", i,
+			       "cube=%d wpos=%d pz=%d)\n", i,
 			       (int)r->light_u_shadow[i], (int)r->light_u_lvp[i],
 			       (int)r->light_u_shadow_cube[i], (int)r->light_u_lwpos[i],
-			       (int)r->light_u_lpz[i], (int)r->light_u_lsoft[i]);
+			       (int)r->light_u_lpz[i]);
 		}
 	}
 	r->light_u_invproj = glGetUniformLocation(r->prog_light, "u_inv_proj");
@@ -5472,16 +5626,11 @@ int RE_gpu_renderer_gl_init(RE_GPURenderer *gr, int width, int height)
 		r->fw_u_world_amb = glGetUniformLocation(r->prog_forward, "u_world_amb");
 		r->fw_u_world_blend = glGetUniformLocation(r->prog_forward, "u_world_blend");
 		r->fw_u_num_lights = glGetUniformLocation(r->prog_forward, "u_num_lights");
-		for (int li = 0; li < GPU_MAX_LIGHTS; li++) {
+		/* ★ раунд 16: в forward те же данные ламп float-текстурой */
+		r->fw_u_lightdata = glGetUniformLocation(r->prog_forward, "u_light_data");
+		r->fw_u_lighttexel = glGetUniformLocation(r->prog_forward, "u_light_texel");
+		for (int li = 0; li < GPU_MAX_SHADOW_LIGHTS; li++) {
 			char nm[32];
-			sprintf(nm, "u_lpos[%d]", li);
-			r->fw_u_lpos[li] = glGetUniformLocation(r->prog_forward, nm);
-			sprintf(nm, "u_ldir[%d]", li);
-			r->fw_u_ldir[li] = glGetUniformLocation(r->prog_forward, nm);
-			sprintf(nm, "u_lcol[%d]", li);
-			r->fw_u_lcol[li] = glGetUniformLocation(r->prog_forward, nm);
-			sprintf(nm, "u_lfl[%d]", li);
-			r->fw_u_lfl[li] = glGetUniformLocation(r->prog_forward, nm);
 			sprintf(nm, "u_shadow[%d]", li);
 			r->fw_u_shadow[li] = glGetUniformLocation(r->prog_forward, nm);
 			sprintf(nm, "u_lvp[%d]", li);
@@ -5492,8 +5641,6 @@ int RE_gpu_renderer_gl_init(RE_GPURenderer *gr, int width, int height)
 			r->fw_u_lwpos[li] = glGetUniformLocation(r->prog_forward, nm);
 			sprintf(nm, "u_lpz[%d]", li);
 			r->fw_u_lpz[li] = glGetUniformLocation(r->prog_forward, nm);
-			sprintf(nm, "u_lsoft[%d]", li);
-			r->fw_u_lsoft[li] = glGetUniformLocation(r->prog_forward, nm);
 		}
 		r->fw_u_pcf = glGetUniformLocation(r->prog_forward, "u_pcf");
 		r->fw_u_shadow_texel = glGetUniformLocation(r->prog_forward, "u_shadow_texel");
@@ -5524,6 +5671,8 @@ int RE_gpu_renderer_gl_init(RE_GPURenderer *gr, int width, int height)
 	r->fw_u_proc_noisesize = glGetUniformLocation(r->prog_forward, "u_proc_noisesize");
 	r->fw_u_proc_noisedepth = glGetUniformLocation(r->prog_forward, "u_proc_noisedepth");
 	r->fw_u_proc_basis = glGetUniformLocation(r->prog_forward, "u_proc_basis");
+	r->fw_u_proc_wf = glGetUniformLocation(r->prog_forward, "u_proc_wf");
+	r->fw_u_proc_dist = glGetUniformLocation(r->prog_forward, "u_proc_dist");
 	r->fw_u_proc_hard = glGetUniformLocation(r->prog_forward, "u_proc_hard");
 	r->fw_u_proc_bright = glGetUniformLocation(r->prog_forward, "u_proc_bright");
 	r->fw_u_proc_contrast = glGetUniformLocation(r->prog_forward, "u_proc_contrast");
@@ -5634,7 +5783,7 @@ int RE_gpu_renderer_gl_init(RE_GPURenderer *gr, int width, int height)
 	       r->rb_depth);
 	/* ★ По одной строке на лампу — раньше было жёстко 4, и при большем лимите
 	 * диагностика молчала о теневых картах остальных ламп. */
-	for (int si = 0; si < GPU_MAX_LIGHTS; si++)
+	for (int si = 0; si < GPU_MAX_SHADOW_LIGHTS; si++)
 		printf("[GPU-INIT] shadow[%d]=%u/%u/%u\n", si,
 		       r->tex_shadow[si], r->shadow_fb[si], r->rb_shadow[si]);
 	{
@@ -5857,6 +6006,12 @@ void RE_gpu_renderer_draw(RE_GPURenderer *gr)
 			printf("[GPU-BUMPSCALE] env=%s scale=%.4f\n",
 			       bs_e ? bs_e : "<unset>", bump_scale);
 	}
+	/* ★ раунд 17: UBF_GPU_NOSPEC=1 отключает карты блика (диагностика крапчатости) */
+	int no_spec = 0;
+	{
+		const char *ns_e = getenv("UBF_GPU_NOSPEC");
+		no_spec = ns_e ? (atoi(ns_e) != 0) : 0;
+	}
 
 	/* M15: forward-проход полупрозрачных мешей. Включается, если программа
 	 * слинковалась и UBF_GPU_FWD != 0. При включённом forward полупрозрачные меши
@@ -6007,6 +6162,8 @@ void RE_gpu_renderer_draw(RE_GPURenderer *gr)
 		glUniform1f(r->gb_u_proc_noisesize, m->proc_noisesize);
 		glUniform1i(r->gb_u_proc_noisedepth, m->proc_noisedepth);
 		glUniform1i(r->gb_u_proc_basis, m->proc_basis);
+	glUniform1i(r->gb_u_proc_wf, m->proc_wf);
+	glUniform1f(r->gb_u_proc_dist, m->proc_dist);
 		glUniform1i(r->gb_u_proc_hard, m->proc_hard);
 		glUniform1f(r->gb_u_proc_bright, m->proc_bright);
 		glUniform1f(r->gb_u_proc_contrast, m->proc_contrast);
@@ -6056,6 +6213,8 @@ void RE_gpu_renderer_draw(RE_GPURenderer *gr)
 			glUniform1f(r->gb_u_proc2_noisesize, m->proc2_noisesize);
 			glUniform1i(r->gb_u_proc2_noisedepth, m->proc2_noisedepth);
 			glUniform1i(r->gb_u_proc2_basis, m->proc2_basis);
+			glUniform1i(r->gb_u_proc2_wf, m->proc2_wf);
+			glUniform1f(r->gb_u_proc2_dist, m->proc2_dist);
 			glUniform1i(r->gb_u_proc2_hard, m->proc2_hard);
 			glUniform1f(r->gb_u_proc2_bright, m->proc2_bright);
 			glUniform1f(r->gb_u_proc2_contrast, m->proc2_contrast);
@@ -6130,7 +6289,7 @@ void RE_gpu_renderer_draw(RE_GPURenderer *gr)
 		}
 		glActiveTexture(GL_TEXTURE4);
 		/* M12: карты блика/жёсткости (переиспользуют сэмпл диффузной карты) */
-		glUniform1f(r->gb_u_has_spec, m->spec_has ? 1.0f : 0.0f);
+		glUniform1f(r->gb_u_has_spec, (m->spec_has && !no_spec) ? 1.0f : 0.0f);
 		glUniform1i(r->gb_u_spec_blend, m->spec_blend);
 		glUniform1f(r->gb_u_spec_fac, m->spec_fac);
 		glUniform1f(r->gb_u_spec_def, m->spec_def);
@@ -6140,7 +6299,7 @@ void RE_gpu_renderer_draw(RE_GPURenderer *gr)
 		glUniform1f(r->gb_u_har_def, m->har_def);
 		glUniform1f(r->gb_u_sv_use_a, (float)m->sv_use_a);
 		/* M13: карта цвета блика (переиспользует сэмпл диффузной карты) */
-		glUniform1f(r->gb_u_has_colspec, m->colspec_has ? 1.0f : 0.0f);
+		glUniform1f(r->gb_u_has_colspec, (m->colspec_has && !no_spec) ? 1.0f : 0.0f);
 		glUniform1i(r->gb_u_colspec_blend, m->colspec_blend);
 		glUniform1f(r->gb_u_colspec_fac, m->colspec_fac);
 		/* M17: MAP_REFL (сила отражения, 5-я цель) */
@@ -6187,7 +6346,7 @@ void RE_gpu_renderer_draw(RE_GPURenderer *gr)
 	glUniform2fv(r->gb_u_nrm_size, 1, m->n_size);
 	glUniform2fv(r->gb_u_nrm_ofs, 1, m->n_ofs);
 	glUniform1f(r->gb_u_nrm_norfac, m->n_has ? m->n_norfac : 0.0f);
-	glUniform1f(r->gb_u_bump_scale, m->n_has ? bump_scale : 0.0f);
+	glUniform1f(r->gb_u_bump_scale, bump_scale);   /* ★ раунд 17: общий для всех ламп/карт множитель bump */
 		glActiveTexture(GL_TEXTURE4);
 		/* screen-door прозрачность (UBF_GPU_ALPHA=0 выключает) */
 		glUniform1f(r->gb_u_alpha, alpha_on ? m->alpha : 1.0f);
@@ -6397,77 +6556,119 @@ void RE_gpu_renderer_draw(RE_GPURenderer *gr)
 	glBindTexture(GL_TEXTURE_2D, r->refl_target ? r->tex_refl : r->tex_refl_def);
 	glUniform1i(r->light_u_refl, 4);
 
-	/* ★ Лампы. Упаковка по vec4 — чтобы обойтись четырьмя массивами вместо
-	 * десятка (см. комментарий у объявлений в LIGHT_FS). */
+	/* ★★ Раунд 16: данные ВСЕХ ламп сцены — одной float-текстурой u_light_data
+	 * (RGBA32F, ширина = число ламп, высота GPU_LIGHT_DATA_ROWS=5). Раньше это
+	 * были четыре per-light uniform-массива (u_lpos/u_ldir/u_lcol/u_lfl), а они
+	 * упирались в лимит uniform-компонентов — отсюда и брался потолок «10 ламп».
+	 * Строки: 0 pos/type, 1 dir/dist, 2 col/falloff,
+	 *         3 sphere/spotsi/spotbl/shadows, 4 soft.
+	 * Юнит 3 (0,1,2,4,5 заняты). */
 	{
-		int n = gr->num_lights;
-		if (n > GPU_MAX_LIGHTS) n = GPU_MAX_LIGHTS;
+		int n = gr->num_lights;   /* ★ искусственного потолка больше нет */
 		glUniform1i(r->light_u_num_lights, n);
-		for (int i = 0; i < n; i++) {
-			const RE_GPULight *L = &gr->lights[i];
-			float type = (float)L->type;
-			/* u_lpos: xyz = позиция (или направление для солнца), w = тип */
-			float lv_pos[3], lv_dir[3];
-			gpu_light_view(L, gr->re->viewmat, lv_pos, lv_dir);
-			/* ★ Диагностика: мировая позиция обязана быть НЕИЗМЕННОЙ, свежая
-			 * камерная — меняться вместе с видом, а «залежалая» L->pos (lar->co,
-			 * снятая при сборке базы) — стоять на месте. Это и есть доказательство,
-			 * что свет больше не прилипает к вьюпорту. */
-			if (getenv("UBF_GPU_LIGHTDBG")) {
+
+		{
+			int w = (n > 0) ? n : 1;
+			if (r->tex_lights == 0) glGenTextures(1, &r->tex_lights);
+			glActiveTexture(GL_TEXTURE3);
+			glBindTexture(GL_TEXTURE_2D, r->tex_lights);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			if (r->light_buf_cap < w * GPU_LIGHT_DATA_ROWS * 4) {
+				if (r->light_buf) MEM_freeN(r->light_buf);
+				r->light_buf_cap = w * GPU_LIGHT_DATA_ROWS * 4;
+				r->light_buf = MEM_callocN(sizeof(float) * r->light_buf_cap,
+				                           "gpu light tex");
+			}
+			float *b = r->light_buf;
+			memset(b, 0, sizeof(float) * w * GPU_LIGHT_DATA_ROWS * 4);
+			for (int i = 0; i < n; i++) {
+				const RE_GPULight *L = &gr->lights[i];
+				float lv_pos[3], lv_dir[3];
+				float *r0 = b + (0 * w + i) * 4;
+				float *r1 = b + (1 * w + i) * 4;
+				float *r2 = b + (2 * w + i) * 4;
+				float *r3 = b + (3 * w + i) * 4;
+				float *r4 = b + (4 * w + i) * 4;
+				gpu_light_view(L, gr->re->viewmat, lv_pos, lv_dir);
+				/* солнце: в pos кладём НАПРАВЛЕНИЕ (как делал прежний u_lpos) */
+				r0[0] = (L->type == GPU_LIGHT_SUN) ? lv_dir[0] : lv_pos[0];
+				r0[1] = (L->type == GPU_LIGHT_SUN) ? lv_dir[1] : lv_pos[1];
+				r0[2] = (L->type == GPU_LIGHT_SUN) ? lv_dir[2] : lv_pos[2];
+				r0[3] = (float)L->type;
+				r1[0] = lv_dir[0]; r1[1] = lv_dir[1]; r1[2] = lv_dir[2];
+				r1[3] = L->dist;
+				r2[0] = L->color[0]; r2[1] = L->color[1]; r2[2] = L->color[2];
+				r2[3] = (float)L->falloff;
+				r3[0] = (float)L->sphere; r3[1] = L->spotsi; r3[2] = L->spotbl;
+				/* w = даёт ли лампа тень. UBF_GPU_NOSHADOW=1 — диагностика:
+				 * полностью выключить тени ламп (проверка, не «затеняет» ли
+				 * теневая карта всю сцену). */
+				r3[3] = (L->shadows && !getenv("UBF_GPU_NOSHADOW")) ? 1.0f : 0.0f;
+				r4[0] = L->soft;
+			}
+			glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+			if (r->tex_lights_w != w) {
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, GPU_LIGHT_DATA_ROWS, 0,
+				             GL_RGBA, GL_FLOAT, b);
+				r->tex_lights_w = w;
+			}
+			else {
+				glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, GPU_LIGHT_DATA_ROWS,
+				                GL_RGBA, GL_FLOAT, b);
+			}
+			glUniform1i(r->light_u_lightdata, 3);
+			glUniform2f(r->light_u_lighttexel, 1.0f / (float)w,
+			            1.0f / (float)GPU_LIGHT_DATA_ROWS);
+			/* ★ Диагностика (UBF_GPU_LIGHTDBG): мировая позиция обязана быть
+			 * НЕИЗМЕННОЙ, свежая камерная — меняться вместе с видом. */
+			if (getenv("UBF_GPU_LIGHTDBG") && n > 0) {
 				static float dbg_vm0 = 999.0f;
-				static float dbg_vm1 = 999.0f;
-				if (re->viewmat[0][0] != dbg_vm0 || re->viewmat[0][1] != dbg_vm1) {
+				if (re->viewmat[0][0] != dbg_vm0) {
+					float dp[3], dd[3];
 					dbg_vm0 = re->viewmat[0][0];
-					dbg_vm1 = re->viewmat[0][1];
-					printf("[GPU-LIGHTVIEW] L%d world=(%.2f %.2f %.2f) view_now=(%.2f %.2f %.2f) "
+					gpu_light_view(&gr->lights[0], re->viewmat, dp, dd);
+					printf("[GPU-LIGHTVIEW] L0 world=(%.2f %.2f %.2f) view_now=(%.2f %.2f %.2f) "
 					       "stale=(%.2f %.2f %.2f) viewmat0=(%.3f %.3f %.3f)\n",
-					       i, L->wpos[0], L->wpos[1], L->wpos[2],
-					       lv_pos[0], lv_pos[1], lv_pos[2],
-					       L->pos[0], L->pos[1], L->pos[2],
+					       gr->lights[0].wpos[0], gr->lights[0].wpos[1], gr->lights[0].wpos[2],
+					       dp[0], dp[1], dp[2],
+					       gr->lights[0].pos[0], gr->lights[0].pos[1], gr->lights[0].pos[2],
 					       re->viewmat[0][0], re->viewmat[0][1], re->viewmat[0][2]);
 				}
 			}
-			glUniform4f(r->light_u_lpos[i],
-			            (L->type == GPU_LIGHT_SUN) ? lv_dir[0] : lv_pos[0],
-			            (L->type == GPU_LIGHT_SUN) ? lv_dir[1] : lv_pos[1],
-			            (L->type == GPU_LIGHT_SUN) ? lv_dir[2] : lv_pos[2],
-			            type);
-			/* u_ldir: xyz = направление конуса спота, w = lar->dist */
-			glUniform4f(r->light_u_ldir[i], lv_dir[0], lv_dir[1], lv_dir[2], L->dist);
-			/* u_lcol: rgb = цвет (уже с energy), a = тип затухания */
-			glUniform4f(r->light_u_lcol[i], L->color[0], L->color[1], L->color[2],
-			            (float)L->falloff);
-			/* u_lfl: x = sphere, y = spotsi, z = spotbl, w = даёт ли лампа тень.
-			 * UBF_GPU_NOSHADOW=1 — диагностика: полностью выключить тени ламп
-			 * (проверка, не «затеняет» ли их теневая карта всю сцену). */
-			glUniform4f(r->light_u_lfl[i], (float)L->sphere, L->spotsi, L->spotbl,
-			            (L->shadows && !getenv("UBF_GPU_NOSHADOW")) ? 1.0f : 0.0f);
-			/* ★ Теневая карта лампы: юнит 6+i для 2D (SUN/SPOT) и 6+GPU_MAX_LIGHTS+i
-			 * для кубической (POINT/AREA); у не-теневых ламп заглушка (шейдер её не
-			 * сэмплит: fl.w=0). ★ Диапазоны НЕ должны пересекаться: при GPU_MAX_LIGHTS>4
-			 * прежняя база 10+i накрывала 2D-юниты 6+i (i>=4) — один юнит держал
-			 * sampler2D и samplerCube, это GL_INVALID_OPERATION на draw, и драйвер
-			 * отменял весь проход (кадр чёрный). (NVIDIA это терпит, но спецификацию
-			 * это нарушает, и на части драйверов отрисовка отменяется.) */
+		}
+
+		/* ★ Теневая карта лампы: юнит 6+i для 2D (SUN/SPOT) и
+		 * 6+GPU_MAX_SHADOW_LIGHTS+i для кубической (POINT/AREA); у не-теневых ламп
+		 * заглушка (шейдер её не сэмплит: r3.w=0). ★ Диапазоны НЕ должны
+		 * пересекаться: один юнит не может держать sampler2D и samplerCube — это
+		 * GL_INVALID_OPERATION на draw, и драйвер отменяет весь проход (кадр
+		 * чёрный). Тень дают только первые GPU_MAX_SHADOW_LIGHTS ламп; остальные
+		 * (индекс >= него) СВЕТЯТ, но без тени. */
+		int ns = n;
+		if (ns > GPU_MAX_SHADOW_LIGHTS) ns = GPU_MAX_SHADOW_LIGHTS;
+		for (int i = 0; i < ns; i++) {
+			const RE_GPULight *L = &gr->lights[i];
 			const int is_cube = (L->type == GPU_LIGHT_POINT || L->type == GPU_LIGHT_AREA);
 			glActiveTexture(GL_TEXTURE6 + i);
 			glBindTexture(GL_TEXTURE_2D,
 			              (!is_cube && L->shadows) ? r->tex_shadow[i] : r->tex_white);
-			glActiveTexture(GL_TEXTURE6 + GPU_MAX_LIGHTS + i);
+			glActiveTexture(GL_TEXTURE6 + GPU_MAX_SHADOW_LIGHTS + i);
 			glBindTexture(GL_TEXTURE_CUBE_MAP,
 			              (is_cube && L->shadows) ? r->tex_shadow_cube[i] : r->tex_cube_white);
 			glUniform1i(r->light_u_shadow[i], 6 + i);
-			glUniform1i(r->light_u_shadow_cube[i], 6 + GPU_MAX_LIGHTS + i);
+			glUniform1i(r->light_u_shadow_cube[i], 6 + GPU_MAX_SHADOW_LIGHTS + i);
 			/* point/area: мировая позиция света (центр куба) и (A,B) пересчёта глубины */
 			glUniform3fv(r->light_u_lwpos[i], 1, (const GLfloat *)L->wpos);
 			glUniform2fv(r->light_u_lpz[i], 1, (const GLfloat *)L->pz);
-			glUniform1f(r->light_u_lsoft[i], L->soft);
 			if (L->shadows && !is_cube) {
 				glUniformMatrix4fv(r->light_u_lvp[i], 1, GL_FALSE,
 				                   (const GLfloat *)L->vp);
 			}
 		}
-		/* вернуть активный юнит: цикл оставил его на 6+GPU_MAX_LIGHTS+i */
+		/* вернуть активный юнит: цикл оставил его на 6+GPU_MAX_SHADOW_LIGHTS+i */
 		glActiveTexture(GL_TEXTURE0);
 		/* UBF_GPU_EXPOSURE — ручная яркость: BI-верное затухание делает сцены с
 		 * маленьким energy заметно темнее, это аварийная ручка. */
@@ -6596,46 +6797,46 @@ void RE_gpu_renderer_draw(RE_GPURenderer *gr)
 		/* ★ Лампы (те же значения, что и в проходе освещения), теневые карты на
 		 * юнитах 10..13 (материальные карты занимают 4,5,6). */
 		{
-			int n = gr->num_lights;
-			if (n > GPU_MAX_LIGHTS) n = GPU_MAX_LIGHTS;
+			int n = gr->num_lights;   /* ★ раунд 16: без потолка */
 			glUniform1i(r->fw_u_num_lights, n);
-			for (int i = 0; i < n; i++) {
+			/* ★ те же данные ламп float-текстурой. Юнит 9 — единственный
+			 * свободный в forward: 0=глубина, 1=albedo, 2/3/7/8=таблицы шума,
+			 * 4=диффуз, 5=нормали, 6=альфа, 10..19=2D-тени и 20..29=куб-тени.
+			 * ★ НЕ юнит 2: его занимает u_proc_hash (процедурные карты), и
+			 * данные ламп были бы перезаписаны на каждом меше с процедуркой. */
+			glActiveTexture(GL_TEXTURE9);
+			glBindTexture(GL_TEXTURE_2D, r->tex_lights);
+			glUniform1i(r->fw_u_lightdata, 9);
+			glUniform2f(r->fw_u_lighttexel,
+			            1.0f / (float)(r->tex_lights_w > 0 ? r->tex_lights_w : 1),
+			            1.0f / (float)GPU_LIGHT_DATA_ROWS);
+			/* Тень — только первые GPU_MAX_SHADOW_LIGHTS ламп (пара сэмплеров на
+			 * лампу); остальные светят без тени, см. LIGHT_FS. */
+			int fw_ns = n;
+			if (fw_ns > GPU_MAX_SHADOW_LIGHTS) fw_ns = GPU_MAX_SHADOW_LIGHTS;
+			for (int i = 0; i < fw_ns; i++) {
 				const RE_GPULight *L = &gr->lights[i];
-				float type = (float)L->type;
-				float fw_lv_pos[3], fw_lv_dir[3];
-				gpu_light_view(L, gr->re->viewmat, fw_lv_pos, fw_lv_dir);
-				glUniform4f(r->fw_u_lpos[i],
-				            (L->type == GPU_LIGHT_SUN) ? fw_lv_dir[0] : fw_lv_pos[0],
-				            (L->type == GPU_LIGHT_SUN) ? fw_lv_dir[1] : fw_lv_pos[1],
-				            (L->type == GPU_LIGHT_SUN) ? fw_lv_dir[2] : fw_lv_pos[2],
-				            type);
-				glUniform4f(r->fw_u_ldir[i], fw_lv_dir[0], fw_lv_dir[1], fw_lv_dir[2], L->dist);
-				glUniform4f(r->fw_u_lcol[i], L->color[0], L->color[1], L->color[2],
-				            (float)L->falloff);
-				glUniform4f(r->fw_u_lfl[i], (float)L->sphere, L->spotsi, L->spotbl,
-				            L->shadows ? 1.0f : 0.0f);
-				/* ★ 2D-карта — юнит 10+i, кубическая — 10+GPU_MAX_LIGHTS+i: разного
-				 * типа сэмплеры не должны делить один юнит (иначе GL_INVALID_OPERATION
-				 * и отмена прохода — см. комментарий в проходе освещения). */
+				/* ★ 2D-карта — юнит 10+i, кубическая — 10+GPU_MAX_SHADOW_LIGHTS+i:
+				 * разного типа сэмплеры не должны делить один юнит (иначе
+				 * GL_INVALID_OPERATION и отмена прохода — см. проход освещения). */
 				const int is_cube = (L->type == GPU_LIGHT_POINT || L->type == GPU_LIGHT_AREA);
 				glActiveTexture(GL_TEXTURE10 + i);
 				glBindTexture(GL_TEXTURE_2D,
 				              (!is_cube && L->shadows) ? r->tex_shadow[i] : r->tex_white);
-				glActiveTexture(GL_TEXTURE10 + GPU_MAX_LIGHTS + i);
+				glActiveTexture(GL_TEXTURE10 + GPU_MAX_SHADOW_LIGHTS + i);
 				glBindTexture(GL_TEXTURE_CUBE_MAP,
 				              (is_cube && L->shadows) ? r->tex_shadow_cube[i] : r->tex_cube_white);
 				glUniform1i(r->fw_u_shadow[i], 10 + i);
-				glUniform1i(r->fw_u_shadow_cube[i], 10 + GPU_MAX_LIGHTS + i);
+				glUniform1i(r->fw_u_shadow_cube[i], 10 + GPU_MAX_SHADOW_LIGHTS + i);
 				glUniform3fv(r->fw_u_lwpos[i], 1, (const GLfloat *)L->wpos);
 				glUniform2fv(r->fw_u_lpz[i], 1, (const GLfloat *)L->pz);
-				glUniform1f(r->fw_u_lsoft[i], L->soft);
 				if (L->shadows && !is_cube) {
 					glUniformMatrix4fv(r->fw_u_lvp[i], 1, GL_FALSE,
 					                   (const GLfloat *)L->vp);
 				}
 			}
 		}
-		/* вернуть активный юнит: цикл оставил его на 10+GPU_MAX_LIGHTS+i */
+		/* вернуть активный юнит: цикл оставил его на 10+GPU_MAX_SHADOW_LIGHTS+i */
 		glActiveTexture(GL_TEXTURE0);
 		{
 			const char *expo_e = getenv("UBF_GPU_EXPOSURE");
@@ -6737,6 +6938,8 @@ void RE_gpu_renderer_draw(RE_GPURenderer *gr)
 			glUniform1f(r->fw_u_proc_noisesize, m->proc_noisesize);
 			glUniform1i(r->fw_u_proc_noisedepth, m->proc_noisedepth);
 			glUniform1i(r->fw_u_proc_basis, m->proc_basis);
+	glUniform1i(r->fw_u_proc_wf, m->proc_wf);
+	glUniform1f(r->fw_u_proc_dist, m->proc_dist);
 			glUniform1i(r->fw_u_proc_hard, m->proc_hard);
 			glUniform1f(r->fw_u_proc_bright, m->proc_bright);
 			glUniform1f(r->fw_u_proc_contrast, m->proc_contrast);

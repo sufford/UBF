@@ -263,6 +263,8 @@ typedef struct RE_GPUMesh {
 	float proc_noisesize; /* tex->noisesize (CLOUDS) */
 	int proc_noisedepth;  /* tex->noisedepth (CLOUDS), обрезан до 0..8 */
 	int proc_basis;       /* tex->noisebasis */
+	int proc_wf;          /* ★ M31: tex->noisebasis2 — waveform WOOD (0=SIN,1=SAW,2=TRI) */
+	float proc_dist;      /* ★ M31: tex->dist_amount — DISTORTED_NOISE distortion */
 	int proc_hard;        /* tex->noisetype != TEX_NOISESOFT */
 	float proc_bright;    /* tex->bright (BRICONT) */
 	float proc_contrast;  /* tex->contrast (BRICONT) */
@@ -284,7 +286,8 @@ typedef struct RE_GPUMesh {
 	 * для MAP_SPEC/MAP_HAR. Таблицы шума (hash/hashv/hashp) общие с первой;
 	 * свой только колорбэнд. */
 	int has_proc2;
-	int proc2_type, proc2_stype, proc2_flip, proc2_noisedepth, proc2_basis, proc2_hard;
+	int proc2_type, proc2_stype, proc2_flip, proc2_noisedepth, proc2_basis, proc2_wf, proc2_hard;
+	float proc2_dist;
 	int proc2_noclamp, proc2_has_ramp, proc2_orco;
 	float proc2_noisesize, proc2_bright, proc2_contrast, proc2_size[2], proc2_ofs[2];
 	unsigned char proc2_ramp[256 * 4];
@@ -344,13 +347,29 @@ typedef struct RE_GPUScene {
 
 /* Свет для деферред-шейдинга. Поля — ровно то, из чего BI считает вклад лампы
  * в lamp_get_visibility() (shadeoutput.c), чтобы затухание совпадало с BI.
- * ★ Потолок задан не производительностью, а текстурными юнитами: на каждую лампу
- *   в шейдере висит ПАРА сэмплеров — 2D-тень (юнит 6+i) и кубическая
- *   (6+GPU_MAX_LIGHTS+i) в проходе света, 10+i и 10+GPU_MAX_LIGHTS+i в forward.
- *   Итого нужно 10 + 2*GPU_MAX_LIGHTS юнитов (на NVIDIA обычно 32 → до 11 ламп).
- *   При нехватке линковка шейдера падает, и проход молча отменяется (кадр чёрный),
- *   поэтому лимит виден в диагностике [GPU-CAPS] max_texture_image_units. */
-#define GPU_MAX_LIGHTS 10
+ * ★★ РАУНД 16: ИСКУССТВЕННЫЙ ПОТОЛОК «10 ЛАМП» УБРАН — светятся ВСЕ лампы сцены.
+ *
+ *   Откуда он брался: на каждую лампу в шейдере висела ПАРА сэмплеров — 2D-тень
+ *   (юнит 6+i) и кубическая (6+N+i) в проходе света, 10+i и 10+N+i в forward.
+ *   Итого 10 + 2*N текстурных юнитов (на NVIDIA обычно 32) → максимум ~11 ламп,
+ *   независимо от производительности.
+ *
+ *   Теперь потолок остался ТОЛЬКО У ТЕНЕЙ: GPU_MAX_SHADOW_LIGHTS ламп отбрасывают
+ *   тень, а СВЕТ считается от ВСЕХ ламп. Данные ламп шейдер берёт не из
+ *   per-light юниформов, а из float-текстуры u_light_data — 5 текселей RGBA32F на
+ *   лампу (pos/type, dir/dist, col/falloff, sphere/spotsi/spotbl/shadows,
+ *   soft) — и идёт динамическим циклом по u_num_lights. Число ламп задаётся
+ *   размером текстуры, поэтому лимита больше нет: только вместимость GL-текстуры
+ *   и время шейдера.
+ *
+ *   Лампы с индексом >= GPU_MAX_SHADOW_LIGHTS светят БЕЗ тени: шейдер получает для
+ *   них fl.w=0 и заглушки-сэмплеры, ветка тени не исполняется, картинка цела.
+ *
+ *   При нехватке юнитов линковка шейдера упадёт и проход молча отменится (кадр
+ *   чёрный) — фактический запас виден в диагностике [GPU-CAPS]
+ *   max_texture_image_units. */
+#define GPU_MAX_SHADOW_LIGHTS 10
+#define GPU_LIGHT_DATA_ROWS   5   /* строк в текстуре u_light_data (см. выше) */
 
 enum {
 	GPU_LIGHT_SUN = 0,    /* направленный (и LA_HEMI) */
@@ -385,7 +404,7 @@ typedef struct RE_GPULight {
 	 * затеняет трассировкой лучей, которой у деферред-растеризатора нет — поэтому
 	 * мы делаем ему теневую карту. Точечная и AREA в BI тоже затеняются только
 	 * трассировкой (буфера нет), поэтому у нас кубическая карта. Карта
-	 * индексируется НОМЕРОМ лампы (текстура создаётся на все GPU_MAX_LIGHTS),
+	 * индексируется НОМЕРОМ лампы (текстура создаётся на все GPU_MAX_SHADOW_LIGHTS),
 	 * а не отдельным слотом. */
 	int shadows;           /* 1 — лампа даёт тень (и матрицы ниже заполнены) */
 	float soft;            /* lar->soft: мягкость тени (0..100, по умолч. 3). В BI это
@@ -426,10 +445,13 @@ typedef struct RE_GPURenderer {
 	int scene_dirty;
 
 	/* Свет (собирается джобой из сцены, используется в шейдинге).
-	 * Каждая лампа несёт свои теневые матрицы (см. RE_GPULight.shadows). */
-	RE_GPULight lights[GPU_MAX_LIGHTS];
+	 * Каждая лампа несёт свои теневые матрицы (см. RE_GPULight.shadows).
+	 * ★ Раунд 16: массив ДИНАМИЧЕСКИЙ — число ламп больше не ограничено (было 10).
+	 * Перевыделяется в gpu_gather_lights, освобождается в RE_gpu_renderer_free. */
+	RE_GPULight *lights;
 	int num_lights;
-	int num_shadow_lights;  /* сколько ламп реально дают тень (0..GPU_MAX_LIGHTS) */
+	int lights_cap;         /* вместимость lights (в элементах) */
+	int num_shadow_lights;  /* сколько ламп реально дают тень (0..GPU_MAX_SHADOW_LIGHTS) */
 
 	float light_dir[3];    /* направление на свет (view-space) */
 	float light_color[3];
